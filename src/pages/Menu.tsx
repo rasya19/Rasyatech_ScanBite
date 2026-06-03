@@ -947,9 +947,9 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
               onClick={handleResetCustomerSession}
               type="button"
               className="flex items-center gap-1 py-1.5 px-2.5 rounded-xl bg-orange-50 hover:bg-orange-100 border border-orange-200 text-orange-850 font-black text-[10px] uppercase tracking-wider transition-all cursor-pointer shadow-3xs"
-              title="Reset Sesi Pemesanan"
+              title="Mulai sesi pemesanan baru"
             >
-              <span>Reset Sesi ❌</span>
+              <span>MULAI SESI BARU ❌</span>
             </button>
 
             <button

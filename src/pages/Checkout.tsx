@@ -258,6 +258,8 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
   });
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
   const [dbError, setDbError] = useState<string | null>(null);
+  const [isSavingPayment, setIsSavingPayment] = useState(false);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
 
   // Cash / Tunai Opsi Pembayaran states
   const [payMethod, setPayMethod] = useState<'qris' | 'cash'>('qris');
@@ -569,22 +571,172 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
     }
   }, [jukeboxQueue]);
 
+  const savePaymentWithRetry = async (paymentType: 'single' | 'all', targetUser?: string): Promise<boolean> => {
+    if (!supabase) {
+      console.warn('⚠️ Supabase client not initialized or offline.');
+      return true; // proceed locally offline if supabase is absent
+    }
+
+    const tenantId = localStorage.getItem('current_tenant') || 'scanbite_live';
+    const cleanTableNum = tableNumber.replace('Meja ', '').trim();
+
+    let attempts = 0;
+    while (attempts < 3) {
+      attempts++;
+      console.log(`🔄 [PAYMENT UPDATE] Attempt ${attempts}/3 for table ${cleanTableNum}...`);
+      try {
+        // Create 5s timeout promise
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Koneksi Supabase timeout setelah 5000ms')), 5000)
+        );
+
+        const updateOperation = async () => {
+          // 1. Fetch active session
+          const { data: sessions, error: sessionFetchErr } = await supabase
+            .from('order_sessions')
+            .select('*')
+            .eq('tenant_id', tenantId)
+            .eq('table_id', cleanTableNum)
+            .eq('status', 'active');
+
+          if (sessionFetchErr) throw sessionFetchErr;
+
+          if (sessions && sessions.length > 0) {
+            const session = sessions[0];
+            let cartItems = Array.isArray(session.cart) ? session.cart : [];
+            if (typeof session.cart === 'string') {
+              try { cartItems = JSON.parse(session.cart); } catch (_) {}
+            }
+
+            // Update user's items in cart
+            const updatedCart = cartItems.map((item: any) => {
+              if (paymentType === 'all') {
+                return { ...item, payment_status: 'paid' };
+              } else if (targetUser && item.user && item.user.toLowerCase() === targetUser.toLowerCase()) {
+                return { ...item, payment_status: 'paid' };
+              }
+              return item;
+            });
+
+            // Check if all items in table are paid
+            const allItemsPaid = updatedCart.every((item: any) => item.payment_status === 'paid');
+
+            const sessionUpdateObj: any = {
+              cart: updatedCart,
+              last_active_at: new Date().toISOString()
+            };
+
+            // If everyone paid or we paid all
+            if (allItemsPaid || paymentType === 'all') {
+              sessionUpdateObj.status = 'paid';
+              sessionUpdateObj.paid_at = new Date().toISOString();
+            }
+
+            const { error: sessionUpdateErr } = await supabase
+              .from('order_sessions')
+              .update(sessionUpdateObj)
+              .eq('id', session.id);
+
+            if (sessionUpdateErr) throw sessionUpdateErr;
+          }
+
+          // 2. Fetch active orders in sb_orders
+          const { data: orders, error: ordersFetchErr } = await supabase
+            .from('sb_orders')
+            .select('*')
+            .or(`table_number.eq."Meja ${cleanTableNum}",table_number.eq."${cleanTableNum}"`)
+            .neq('status', 'completed');
+
+          if (!ordersFetchErr && orders && orders.length > 0) {
+            for (const ord of orders) {
+              let parsedItems: any[] = [];
+              let colName = 'order_items';
+              if (ord.order_items) {
+                parsedItems = Array.isArray(ord.order_items) ? ord.order_items : [];
+              } else if (ord.items) {
+                parsedItems = Array.isArray(ord.items) ? ord.items : [];
+                colName = 'items';
+              }
+
+              // Update target user's item payment_status
+              const updatedItems = parsedItems.map((item: any) => {
+                if (paymentType === 'all') {
+                  return { ...item, payment_status: 'paid' };
+                } else if (targetUser) {
+                  const orderedByStr = item.ordered_by || item.orderedBy || '';
+                  if (orderedByStr.toLowerCase().includes(targetUser.toLowerCase())) {
+                    return { ...item, payment_status: 'paid' };
+                  }
+                }
+                return item;
+              });
+
+              const allOrderItemsPaid = updatedItems.every((item: any) => item.payment_status === 'paid');
+
+              const orderUpdateObj: any = {};
+              orderUpdateObj[colName] = updatedItems;
+
+              if (allOrderItemsPaid || paymentType === 'all') {
+                orderUpdateObj.status = 'completed';
+                orderUpdateObj.payment_status = 'paid';
+              }
+
+              const { error: orderUpdateErr } = await supabase
+                .from('sb_orders')
+                .update(orderUpdateObj)
+                .eq('id', ord.id);
+              
+              if (orderUpdateErr) throw orderUpdateErr;
+            }
+          }
+
+          // 3. Send Supabase Realtime broadcast to channel orders:{tenant_id}
+          const channel = supabase.channel(`orders:${tenantId}`);
+          channel.subscribe(async (status) => {
+            if (status === 'SUBSCRIBED') {
+              await channel.send({
+                type: 'broadcast',
+                event: 'payment_completed',
+                payload: { table_id: cleanTableNum, user: targetUser || 'All' }
+              });
+              // Clean up channel after send
+              supabase.removeChannel(channel);
+            }
+          });
+
+          return true;
+        };
+
+        const result = await Promise.race([updateOperation(), timeoutPromise]);
+        return result;
+
+      } catch (err: any) {
+        console.error(`⚠️ [PAYMENT ERROR] Attempt ${attempts} failed:`, err);
+        
+        // Log Sentry mock check
+        if (typeof window !== 'undefined' && (window as any).Sentry) {
+          try {
+            (window as any).Sentry.captureException(err);
+          } catch (_) {}
+        }
+
+        if (attempts >= 3) {
+          throw err; // max attempts exceeded, propagate error directly
+        }
+        // exponential backoff wait
+        await new Promise((resolve) => setTimeout(resolve, 800 * attempts));
+      }
+    }
+    return false;
+  };
+
   // 3. Fungsi Bayar Mandiri Bill individual 
   const handlePayBill = async (userName: string) => {
     const userChange = payMethod === 'cash' ? Math.max(0, cashAmount - (paymentModalUser?.grandTotal || 0)) : 0;
     
-    // Flag this user bill in main state
-    setBills((prev) => 
-      prev.map((b) => b.name === userName ? { 
-        ...b, 
-        isPaid: true,
-        payMethod: payMethod,
-        cashAmount: payMethod === 'cash' ? cashAmount : 0,
-        changeAmount: userChange
-      } : b)
-    );
-    setPaymentModalUser(null);
-    
+    setIsSavingPayment(true);
+    setPaymentError(null);
+
     const updatedBills = bills.map((b) => b.name === userName ? { 
       ...b, 
       isPaid: true,
@@ -592,10 +744,27 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
       cashAmount: payMethod === 'cash' ? cashAmount : 0,
       changeAmount: userChange
     } : b);
-    
-    // Jika SELURUH kawan semeja sudah melunasi tagihannya masing-masing
-    if (updatedBills.every((b) => b.isPaid)) {
-      await registerCompletedOrder(updatedBills);
+
+    try {
+      // Perform database update FIRST before modifying UI
+      const isSynced = await savePaymentWithRetry('single', userName);
+      if (!isSynced && supabase) {
+        throw new Error('Gagal menyimpan pembayaran ke cloud.');
+      }
+
+      // Sync and payment succeeded, now update local state and close/process
+      setBills(updatedBills);
+      setPaymentModalUser(null);
+      
+      // Jika SELURUH kawan semeja sudah melunasi tagihannya masing-masing
+      if (updatedBills.every((b) => b.isPaid)) {
+        await registerCompletedOrder(updatedBills);
+      }
+    } catch (err: any) {
+      console.error('Payment saving failed:', err);
+      setPaymentError(err.message || 'Koneksi Supabase timeout setelah 5000ms');
+    } finally {
+      setIsSavingPayment(false);
     }
   };
 
@@ -603,6 +772,9 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
   const handlePayAllBills = async () => {
     const totalVal = totalUnpaidGrandTotal;
     const userChange = payMethod === 'cash' ? Math.max(0, cashAmount - totalVal) : 0;
+
+    setIsSavingPayment(true);
+    setPaymentError(null);
 
     // Mark ALL bills as paid simultaneously
     const updatedBills = bills.map((b) => ({ 
@@ -612,10 +784,24 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
       cashAmount: payMethod === 'cash' ? cashAmount : 0,
       changeAmount: userChange
     }));
-    setBills(updatedBills);
-    setShowTreatAllModal(false);
-    
-    await registerCompletedOrder(updatedBills, `${customerName} (Traktir Se-Meja)`);
+
+    try {
+      // Sync cloud first
+      const isSynced = await savePaymentWithRetry('all');
+      if (!isSynced && supabase) {
+        throw new Error('Gagal menyimpan pembayaran ke cloud.');
+      }
+
+      setBills(updatedBills);
+      setShowTreatAllModal(false);
+      
+      await registerCompletedOrder(updatedBills, `${customerName} (Traktir Se-Meja)`);
+    } catch (err: any) {
+      console.error('Payment traktir saving failed:', err);
+      setPaymentError(err.message || 'Koneksi Supabase timeout setelah 5000ms');
+    } finally {
+      setIsSavingPayment(false);
+    }
   };
 
   /**
@@ -1537,7 +1723,18 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
       {/* QRIS PEMBAYARAN BOX MODAL */}
       {paymentModalUser && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 border border-[#F1EADF] shadow-2xl text-center space-y-4">
+          <div className="relative overflow-hidden bg-white rounded-3xl max-w-sm w-full p-6 border border-[#F1EADF] shadow-2xl text-center space-y-4 font-sans">
+            
+            {/* Immersive Loading Overlay */}
+            {isSavingPayment && (
+              <div className="absolute inset-0 bg-white/95 backdrop-blur-xs flex flex-col items-center justify-center space-y-4 z-40">
+                <div className="w-12 h-12 border-4 border-[#8C6239] border-t-transparent rounded-full animate-spin"></div>
+                <div className="text-center px-4">
+                  <p className="text-xs font-bold text-[#5B4E44]">Menyimpan Pembayaran...</p>
+                  <p className="text-[10px] text-gray-400">Sedang mencoba sinkronisasi ke Supabase (Maks 3x)</p>
+                </div>
+              </div>
+            )}
             
             <div className="flex justify-between items-center pb-2 border-b border-[#FAF8F5]">
               <span className="text-xs font-black text-[#8C6239] uppercase tracking-wide font-sans">
@@ -1681,42 +1878,87 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
               </div>
             )}
 
-            {/* Pay buttons with explicit water dynamic ripple animations */}
-            <div className="grid grid-cols-2 gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => setPaymentModalUser(null)}
-                className="border border-[#EBE3D5] hover:bg-gray-50 text-[#5B4E44] text-xs font-bold py-3.5 rounded-xl transition-all"
-              >
-                Tutup Batalkan
-              </button>
+            {/* Error handling view inside individual payment modal */}
+            {paymentError && (
+              <div className="bg-red-50 border border-red-250 rounded-2xl p-4 text-center space-y-2.5 animate-fadeIn">
+                <p className="text-xs font-black text-red-600">Gagal menyimpan pembayaran, jangan tutup halaman</p>
+                <div className="text-[10px] text-red-500 font-mono leading-tight bg-white/80 p-2 rounded-xl border border-red-100 max-h-16 overflow-y-auto">
+                  {paymentError}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handlePayBill(paymentModalUser.name)}
+                  className="w-full bg-red-600 hover:bg-red-700 text-white text-[11px] font-black uppercase tracking-wider py-2.5 rounded-xl transition-all font-sans shadow-md"
+                >
+                  Coba Lagi
+                </button>
+              </div>
+            )}
 
-              <button
-                type="button"
-                disabled={payMethod === 'cash' && cashAmount < paymentModalUser.grandTotal}
-                onClick={(e) => handleButtonClickWithRipple(e, () => handlePayBill(paymentModalUser.name))}
-                className={`relative overflow-hidden text-[#FDFBF7] text-xs font-black uppercase tracking-wider py-3.5 rounded-xl transition-colors shadow-md focus:outline-none ${
-                  payMethod === 'cash' && cashAmount < paymentModalUser.grandTotal
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none'
-                    : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/10'
-                }`}
-              >
-                {/* Embedded ripple trigger inside button DOM */}
-                <span className="relative z-10 flex items-center justify-center gap-1">
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>Konfirmasi Lunas</span>
-                </span>
-              </button>
-            </div>
+            {/* Pay buttons with explicit water dynamic ripple animations */}
+            {!paymentError && (
+              <div className="grid grid-cols-2 gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setPaymentModalUser(null)}
+                  className="border border-[#EBE3D5] hover:bg-gray-50 text-[#5B4E44] text-xs font-bold py-3.5 rounded-xl transition-all"
+                >
+                  Tutup Batalkan
+                </button>
+
+                <button
+                  type="button"
+                  disabled={payMethod === 'cash' && cashAmount < paymentModalUser.grandTotal}
+                  onClick={(e) => handleButtonClickWithRipple(e, () => handlePayBill(paymentModalUser.name))}
+                  className={`relative overflow-hidden text-[#FDFBF7] text-xs font-black uppercase tracking-wider py-3.5 rounded-xl transition-colors shadow-md focus:outline-none ${
+                    payMethod === 'cash' && cashAmount < paymentModalUser.grandTotal
+                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none'
+                      : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/10'
+                  }`}
+                >
+                  {/* Embedded ripple trigger inside button DOM */}
+                  <span className="relative z-10 flex items-center justify-center gap-1">
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Konfirmasi Lunas</span>
+                  </span>
+                </button>
+              </div>
+            )}
+
+            {paymentError && (
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaymentError(null);
+                    setPaymentModalUser(null);
+                  }}
+                  className="w-full border border-gray-300 text-gray-500 hover:bg-gray-50 text-xs font-bold py-3 rounded-xl transition-all focus:outline-none"
+                >
+                  Batalkan & Kembali
+                </button>
+              </div>
+            )}
 
           </div>
         </div>
       )}
 
-      {/* MODAL TRAKTIR SEMUA KAWAN SE-MEJA */}
+       {/* MODAL TRAKTIR SEMUA KAWAN SE-MEJA */}
       {showTreatAllModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 border border-[#F1EADF] shadow-2xl text-center space-y-4">
+          <div className="relative overflow-hidden bg-white rounded-3xl max-w-sm w-full p-6 border border-[#F1EADF] shadow-2xl text-center space-y-4 font-sans">
+            
+            {/* Immersive Loading Overlay */}
+            {isSavingPayment && (
+              <div className="absolute inset-0 bg-white/95 backdrop-blur-xs flex flex-col items-center justify-center space-y-4 z-40">
+                <div className="w-12 h-12 border-4 border-[#8C6239] border-t-transparent rounded-full animate-spin"></div>
+                <div className="text-center px-4">
+                  <p className="text-xs font-bold text-[#5B4E44]">Memproses Pembayaran Gabungan...</p>
+                  <p className="text-[10px] text-gray-400">Sedang mencoba sinkronisasi ke Supabase (Maks 3x)</p>
+                </div>
+              </div>
+            )}
             
             <div className="flex justify-between items-center pb-2 border-b border-[#FAF8F5]">
               <div className="flex items-center gap-1 text-[#8C6239]">
@@ -1864,32 +2106,66 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
               </div>
             )}
 
-            {/* Pay buttons with explicit water dynamic ripple animations */}
-            <div className="grid grid-cols-2 gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => setShowTreatAllModal(false)}
-                className="border border-[#EBE3D5] hover:bg-gray-50 text-[#5B4E44] text-xs font-bold py-3.5 rounded-xl transition-all focus:outline-none"
-              >
-                Batalkan
-              </button>
+            {/* Error handling view inside Traktir modal */}
+            {paymentError && (
+              <div className="bg-red-50 border border-red-250 rounded-2xl p-4 text-center space-y-2.5 animate-fadeIn">
+                <p className="text-xs font-black text-red-600">Gagal menyimpan pembayaran, jangan tutup halaman</p>
+                <div className="text-[10px] text-red-500 font-mono leading-tight bg-white/80 p-2 rounded-xl border border-red-100 max-h-16 overflow-y-auto">
+                  {paymentError}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handlePayAllBills()}
+                  className="w-full bg-red-600 hover:bg-red-700 text-white text-[11px] font-black uppercase tracking-wider py-2.5 rounded-xl transition-all font-sans shadow-md"
+                >
+                  Coba Lagi
+                </button>
+              </div>
+            )}
 
-              <button
-                type="button"
-                disabled={payMethod === 'cash' && cashAmount < totalUnpaidGrandTotal}
-                onClick={(e) => handleButtonClickWithRipple(e, () => handlePayAllBills())}
-                className={`relative overflow-hidden text-[#FDFBF7] text-xs font-black uppercase tracking-wider py-3.5 rounded-xl transition-colors shadow-md focus:outline-none ${
-                  payMethod === 'cash' && cashAmount < totalUnpaidGrandTotal
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none'
-                    : 'bg-emerald-600 hover:bg-emerald-700 shadow-[#059669]/10'
-                }`}
-              >
-                <span className="relative z-10 flex items-center justify-center gap-1.5">
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>Traktir Lunas</span>
-                </span>
-              </button>
-            </div>
+            {/* Pay buttons with explicit water dynamic ripple animations */}
+            {!paymentError && (
+              <div className="grid grid-cols-2 gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowTreatAllModal(false)}
+                  className="border border-[#EBE3D5] hover:bg-gray-50 text-[#5B4E44] text-xs font-bold py-3.5 rounded-xl transition-all focus:outline-none"
+                >
+                  Batalkan
+                </button>
+
+                <button
+                  type="button"
+                  disabled={payMethod === 'cash' && cashAmount < totalUnpaidGrandTotal}
+                  onClick={(e) => handleButtonClickWithRipple(e, () => handlePayAllBills())}
+                  className={`relative overflow-hidden text-[#FDFBF7] text-xs font-black uppercase tracking-wider py-3.5 rounded-xl transition-colors shadow-md focus:outline-none ${
+                    payMethod === 'cash' && cashAmount < totalUnpaidGrandTotal
+                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none'
+                      : 'bg-emerald-600 hover:bg-emerald-700 shadow-[#059669]/10'
+                  }`}
+                >
+                  <span className="relative z-10 flex items-center justify-center gap-1.5">
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Traktir Lunas</span>
+                  </span>
+                </button>
+              </div>
+            )}
+
+            {paymentError && (
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaymentError(null);
+                    setShowTreatAllModal(false);
+                  }}
+                  className="w-full border border-gray-300 text-gray-500 hover:bg-gray-50 text-xs font-bold py-3 rounded-xl transition-all focus:outline-none"
+                >
+                  Batalkan & Kembali
+                </button>
+              </div>
+            )}
 
           </div>
         </div>

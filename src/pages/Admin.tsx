@@ -272,6 +272,7 @@ export default function Admin({ onNavigate }: AdminProps) {
     return saved ? JSON.parse(saved) : ['01', '02', '03', '04', '05', '06', '07', '08'];
   });
   const [tablesData, setTablesData] = useState<any[]>([]);
+  const [activeSessions, setActiveSessions] = useState<any[]>([]);
   const [isAddTableOpen, setIsAddTableOpen] = useState(false);
   const [newTableNum, setNewTableNum] = useState('');
 
@@ -962,29 +963,51 @@ export default function Admin({ onNavigate }: AdminProps) {
     }
 
     try {
-      const { data: ordersData, error } = await supabase
-        .from('sb_orders')
+      const activeTenant = localStorage.getItem('current_tenant') || currentTenant || 'scanbite_live';
+      const { data: sessionData, error: sessionFetchErr } = await supabase
+        .from('order_sessions')
         .select('*')
-        .neq('status', 'completed')
-        .neq('status', 'delivered');
+        .eq('tenant_id', activeTenant)
+        .in('status', ['active', 'paid', 'cooking']);
 
-      if (!error && ordersData) {
+      let hasSessions = false;
+      if (!sessionFetchErr && sessionData && sessionData.length > 0) {
+        hasSessions = true;
+        setActiveSessions(sessionData);
+
         const computedDetails = activeTables.map(num => {
-          const tableOrders = ordersData.filter(o => {
-            const mVal = (o.table_number || '').toString();
-            return mVal.includes(num) || mVal.includes(parseInt(num).toString());
+          const matchedSession = sessionData.find(s => {
+            const tableIdClean = (s.table_id || '').toString().replace('Meja ', '').trim();
+            return tableIdClean === num || tableIdClean === parseInt(num).toString();
           });
 
-          // Active order has payment_status !== 'paid'
-          const activeOrder = tableOrders.find(o => o.payment_status !== 'paid');
+          if (matchedSession) {
+            let namesStr = '-';
+            if (Array.isArray(matchedSession.active_users)) {
+              namesStr = matchedSession.active_users.join(', ');
+            } else if (typeof matchedSession.active_users === 'string') {
+              try {
+                namesStr = JSON.parse(matchedSession.active_users).join(', ');
+              } catch (_) {
+                namesStr = matchedSession.active_users;
+              }
+            }
+            
+            let gridStatus = 'SEDANG MAKAN';
+            if (matchedSession.status === 'cooking') {
+              gridStatus = 'MELAYANI';
+            } else if (matchedSession.status === 'paid') {
+              gridStatus = 'SEDANG MAKAN';
+            } else if (matchedSession.status === 'active') {
+              gridStatus = 'SEDANG MAKAN';
+            }
 
-          if (activeOrder) {
             return {
               nomor_meja_id: num,
               nomor_meja: `Meja ${num}`,
-              status: activeOrder.status === 'pending' ? 'MELAYANI' : 'SEDANG MAKAN',
-              session_id: activeOrder.id,
-              nama_pelanggan: activeOrder.customer_name || '-'
+              status: gridStatus,
+              session_id: matchedSession.session_id || matchedSession.id,
+              nama_pelanggan: namesStr
             };
           }
 
@@ -999,11 +1022,52 @@ export default function Admin({ onNavigate }: AdminProps) {
 
         setTablesData(computedDetails);
         localStorage.setItem('scanbite_tables_details', JSON.stringify(computedDetails));
-      } else {
-        setTablesData(baseDetails);
+      }
+
+      if (!hasSessions) {
+        // Fallback to sb_orders if order_sessions is empty or failed
+        const { data: ordersData, error } = await supabase
+          .from('sb_orders')
+          .select('*')
+          .neq('status', 'completed')
+          .neq('status', 'delivered');
+
+        if (!error && ordersData) {
+          const computedDetails = activeTables.map(num => {
+            const tableOrders = ordersData.filter(o => {
+              const mVal = (o.table_number || '').toString();
+              return mVal.includes(num) || mVal.includes(parseInt(num).toString());
+            });
+
+            const activeOrder = tableOrders.find(o => o.payment_status !== 'paid');
+
+            if (activeOrder) {
+              return {
+                nomor_meja_id: num,
+                nomor_meja: `Meja ${num}`,
+                status: activeOrder.status === 'pending' ? 'MELAYANI' : 'SEDANG MAKAN',
+                session_id: activeOrder.id,
+                nama_pelanggan: activeOrder.customer_name || '-'
+              };
+            }
+
+            return {
+              nomor_meja_id: num,
+              nomor_meja: `Meja ${num}`,
+              status: 'KOSONG',
+              session_id: null,
+              nama_pelanggan: '-'
+            };
+          });
+
+          setTablesData(computedDetails);
+          localStorage.setItem('scanbite_tables_details', JSON.stringify(computedDetails));
+        } else {
+          setTablesData(baseDetails);
+        }
       }
     } catch (e: any) {
-      console.warn('Error fetching tables dynamically from orders:', e.message);
+      console.warn('Error fetching tables dynamically from orders/sessions:', e.message);
       setTablesData(baseDetails);
     }
   };
@@ -1392,8 +1456,26 @@ export default function Admin({ onNavigate }: AdminProps) {
         console.log(`🔌 [REALTIME STATUS] Koneksi realtime dashboard-synced: ${status}`, err || '');
       });
 
+    // Create a subscription channel to catch instant payment broadcasts
+    const ordersChannel = supabase.channel(`orders:${activeTenant}`)
+      .on('broadcast', { event: 'payment_completed' }, (payload: any) => {
+        console.log("⚡ [REALTIME BROADCAST RECEIVED] Payment completed broadcast!", payload);
+        fetchOrders();
+        fetchTables();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_sessions' }, (payload: any) => {
+        console.log("⚡ [REALTIME ALERT] Perubahan terdeteksi di tabel order_sessions:", payload);
+        const rowTenant = payload.new?.tenant_id || payload.old?.tenant_id;
+        if (!rowTenant || rowTenant === activeTenant) {
+          fetchOrders();
+          fetchTables();
+        }
+      })
+      .subscribe();
+
     return () => {
       supabase.removeChannel(liveChannel);
+      supabase.removeChannel(ordersChannel);
     };
   }, [isAuthenticated, currentTenant]);
 
@@ -2547,7 +2629,7 @@ export default function Admin({ onNavigate }: AdminProps) {
                 }
               })();
 
-              const statsActiveOrders = orders.filter(o => o.status === 'pending' || o.status === 'preparing').length;
+              const statsActiveOrders = supabase && activeSessions.length > 0 ? activeSessions.length : orders.filter(o => o.status === 'pending' || o.status === 'preparing').length;
 
               const statsOccupiedTables = tablesList.filter(num => {
                 const activeTableOrders = orders.filter(o => o.tableNumber === num && o.status !== 'delivered');

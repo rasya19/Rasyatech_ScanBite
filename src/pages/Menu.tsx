@@ -186,91 +186,76 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     if (!queryTable && savedTable) setTableNumber(savedTable);
   }, []);
 
-  // Check table occupied sessions to prevent customer data mix-up
-  const checkTableSession = async () => {
-    if (!tableNumber) return;
+  // Join and sync the shared ordering session based on tenant_id and table_id
+  const [activeUsers, setActiveUsers] = useState<string[]>([]);
+  const [isSessionLoaded, setIsSessionLoaded] = useState(false);
+
+  const joinSession = async (cName: string, tNum: string) => {
+    if (!cName || !tNum) return;
+    const activeTenant = localStorage.getItem('current_tenant') || 'scanbite_live';
     
-    let mySessionId = localStorage.getItem('scanbite_session_id');
-    
-    if (supabase) {
-      try {
-        const { data: activeOrders, error } = await supabase
-          .from('sb_orders')
-          .select('id, status, customer_name, table_number')
-          .or(`table_number.eq."Meja ${tableNumber}",table_number.eq."${tableNumber}"`)
-          .in('status', ['pending', 'preparing']);
-           
-        if (!error && activeOrders && activeOrders.length > 0) {
-          const latestOrder = activeOrders[0];
-          const savedOrders = localStorage.getItem('scanbite_orders');
-          let hasMatched = false;
-          if (savedOrders) {
-            const parsed = JSON.parse(savedOrders);
-            hasMatched = parsed.some((o: any) => o.id === latestOrder.id);
-          }
-          
-          if (!hasMatched) {
-            setOccupiedSessionId(latestOrder.id);
-            setShowOccupiedModal(true);
-            return;
-          }
-        } else {
-          if (!mySessionId) {
-            const freshSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-            localStorage.setItem('scanbite_session_id', freshSession);
+    try {
+      const res = await fetch('/api/order-sessions/join', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tenant_id: activeTenant,
+          table_id: tNum,
+          customer_name: cName
+        })
+      });
+      const resData = await res.json();
+      if (resData.success && resData.data) {
+        const sess = resData.data;
+        localStorage.setItem('scanbite_session_id', sess.session_id);
+        
+        let listUsers: string[] = [];
+        if (Array.isArray(sess.active_users)) {
+          listUsers = sess.active_users;
+        } else if (typeof sess.active_users === 'string') {
+          try {
+            listUsers = JSON.parse(sess.active_users);
+          } catch (_) {
+            listUsers = sess.active_users.split(',').map((u: string) => u.trim()).filter(Boolean);
           }
         }
-      } catch (err) {
-        handleLocalSessionCheck(mySessionId);
+        
+        setActiveUsers(listUsers);
+        setRoommates(listUsers.filter((u: string) => u !== cName));
+        
+        if (Array.isArray(sess.cart)) {
+          setCart(sess.cart);
+        }
+        setIsSessionLoaded(true);
+        triggerNotification(`👥 Berhasil bergabung ke Sesi Meja ${tNum} dengan ${listUsers.length} pengguna!`);
+        console.log("Joined shared ordering session:", sess.session_id);
       }
-    } else {
-      handleLocalSessionCheck(mySessionId);
+    } catch (err) {
+      console.error("Failed to connect/join order session on backend:", err);
+      // Resilient fallback logic if server connectivity is disrupted
+      const freshSession = localStorage.getItem('scanbite_session_id') || `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      localStorage.setItem('scanbite_session_id', freshSession);
+      setActiveUsers([cName]);
+      setRoommates([]);
+      setIsSessionLoaded(true);
     }
-  };
-
-  const handleLocalSessionCheck = (mySessionId: string | null) => {
-    const savedOrders = localStorage.getItem('scanbite_orders');
-    let hasActiveLocalOrder = false;
-    let localSession = '';
-    
-    if (savedOrders) {
-      const parsed = JSON.parse(savedOrders);
-      const actives = parsed.filter((o: any) => o.tableNumber === tableNumber && o.status !== 'delivered');
-      if (actives.length > 0) {
-        hasActiveLocalOrder = true;
-        localSession = actives[0].sessionId || `sess-old`;
-      }
-    }
-    
-    if (hasActiveLocalOrder && (!mySessionId || mySessionId !== localSession)) {
-      setOccupiedSessionId(localSession);
-      setShowOccupiedModal(true);
-    } else {
-      if (!mySessionId) {
-        const freshSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-        localStorage.setItem('scanbite_session_id', freshSession);
-      }
-    }
-  };
-
-  const handleConfirmNewCustomer = async () => {
-    setCart([]);
-    const brandNewSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    localStorage.setItem('scanbite_session_id', brandNewSession);
-    setRoommates([]);
-    setShowOccupiedModal(false);
-    triggerNotification('🧹 Keranjang dikosongkan! Selamat datang di sesi pemesanan baru.');
-  };
-
-  const handleConfirmSameSession = () => {
-    if (occupiedSessionId) {
-      localStorage.setItem('scanbite_session_id', occupiedSessionId);
-    }
-    setShowOccupiedModal(false);
-    triggerNotification('👥 Bergabung dengan sesi pesanan aktif meja.');
   };
 
   const handleResetCustomerSession = () => {
+    // Leave session on backend/Supabase first
+    if (customerName && tableNumber) {
+      const activeTenant = localStorage.getItem('current_tenant') || 'scanbite_live';
+      fetch('/api/order-sessions/leave', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tenant_id: activeTenant,
+          table_id: tableNumber,
+          customer_name: customerName
+        })
+      }).catch(err => console.error("Error leaving session:", err));
+    }
+
     // 🧼 Bersihkan semua sampah data meja dan nama pelanggan yang tersangkut
     localStorage.removeItem('customer_name');
     localStorage.removeItem('customer_table');
@@ -284,10 +269,13 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     
     sessionStorage.clear();
     
-    // 🔄 Reset state ke kondisi awal (sesuaikan dengan nama state login/view di file ini)
+    // 🔄 Reset state ke kondisi awal
     setCustomerName('');
     setTableNumber('');
     setCart([]);
+    setIsSessionLoaded(false);
+    setActiveUsers([]);
+    setRoommates([]);
     
     if (typeof onNavigate === 'function') {
       onNavigate('menu');
@@ -325,8 +313,10 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
   }, []);
 
   useEffect(() => {
-    checkTableSession();
-  }, [tableNumber]);
+    if (customerName && tableNumber) {
+      joinSession(customerName, tableNumber);
+    }
+  }, [customerName, tableNumber]);
 
   // Fetch from Supabase Table menus / menu_items with fallback data.ts
   useEffect(() => {
@@ -407,42 +397,42 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     fetchMenus();
   }, []);
 
-  // Configure Supabase Real-Time Broadcast Channel based on tableNumber
+  // Configure Supabase Real-Time Broadcast Channel based on tableNumber using table:tableNumber channel
   useEffect(() => {
     if (!supabase || !tableNumber) return;
 
     // Connect to room channel according to restaurant table code
-    const channel = supabase.channel(`table-${tableNumber}`, {
+    const channel = supabase.channel(`table:${tableNumber}`, {
       config: {
         broadcast: { self: false }
       }
     });
 
     channel
+      .on('broadcast', { event: 'cart_updated' }, (payload: any) => {
+        const { cart: receivedCart, active_users: receivedUsers } = payload.payload;
+        console.log("Realtime Cart Sync Received:", receivedCart);
+        
+        // Update local cart state
+        setCart(receivedCart);
+        if (receivedUsers) {
+          setActiveUsers(receivedUsers);
+          setRoommates(receivedUsers.filter((u: string) => u.toLowerCase() !== customerName.toLowerCase()));
+        }
+      })
       .on('broadcast', { event: 'item_added' }, (payload: any) => {
-        const { user, itemName, itemId } = payload.payload;
-        
+        const { user, itemName } = payload.payload;
         triggerNotification(`⚡ ${user} memasukkan "${itemName}" ke keranjang meja.`);
-        
-        // Append item to state for shared multi-user checkout simulation
-        setCart((prevCart) => {
-          const existing = prevCart.find(
-            (ci) => ci.menuItemId === itemId && ci.user === user
-          );
-          if (existing) {
-            return prevCart.map((ci) => 
-              ci.menuItemId === itemId && ci.user === user
-                ? { ...ci, quantity: ci.quantity + 1 }
-                : ci
-            );
-          }
-          return [...prevCart, { menuItemId: itemId, user, quantity: 1 }];
-        });
       })
       .on('broadcast', { event: 'mate_joined' }, (payload: any) => {
         const { user } = payload.payload;
         triggerNotification(`👥 ${user} telah memindai QR & bergabung di Meja ${tableNumber}!`);
-        setRoommates(prev => prev.includes(user) ? prev : [...prev, user]);
+        setActiveUsers((prev) => {
+          if (prev.includes(user)) return prev;
+          const updated = [...prev, user];
+          setRoommates(updated.filter((u: string) => u.toLowerCase() !== customerName.toLowerCase()));
+          return updated;
+        });
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
@@ -460,6 +450,33 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     };
   }, [tableNumber, customerName]);
 
+  // Synchronize cart state with the backend (db) and broadcast to table channel
+  useEffect(() => {
+    if (!isSessionLoaded || !customerName || !tableNumber) return;
+
+    // 1. Sync to backend order-sessions cart
+    const activeTenant = localStorage.getItem('current_tenant') || 'scanbite_live';
+    fetch('/api/order-sessions/cart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tenant_id: activeTenant,
+        table_id: tableNumber,
+        cart_items: cart
+      })
+    }).catch(err => console.error("Error updating session cart back to database:", err));
+
+    // 2. Broadcast to other table screens
+    if (supabase) {
+      const channel = supabase.channel(`table:${tableNumber}`);
+      channel.send({
+        type: 'broadcast',
+        event: 'cart_updated',
+        payload: { cart, active_users: activeUsers }
+      });
+    }
+  }, [cart, isSessionLoaded, customerName, tableNumber, activeUsers]);
+
   // Handle Add Item to Cart
   const handleAddToCart = (item: MenuItem, targetUser: string = customerName) => {
     setCart((prevCart) => {
@@ -475,16 +492,6 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
       }
       return [...prevCart, { menuItemId: item.id, user: targetUser, quantity: 1 }];
     });
-
-    // Send Broadcast to other diners if Supabase Channel is up
-    if (supabase) {
-      const channel = supabase.channel(`table-${tableNumber}`);
-      channel.send({
-        type: 'broadcast',
-        event: 'item_added',
-        payload: { user: targetUser, itemName: item.name, itemId: item.id }
-      });
-    }
 
     triggerNotification(`✓ "${item.name}" ditambahkan atas nama ${targetUser}!`);
   };
@@ -522,16 +529,18 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
   const handleAddRoommate = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newRoommateName.trim()) return;
-    if (roommates.includes(newRoommateName.trim()) || newRoommateName.trim() === customerName) {
+    if (activeUsers.some(u => u.toLowerCase() === newRoommateName.trim().toLowerCase())) {
       triggerNotification('Nama tersebut sudah bergabung di meja Anda.');
       return;
     }
     const joined = newRoommateName.trim();
-    setRoommates([...roommates, joined]);
+    const updatedUsers = [...activeUsers, joined];
+    setActiveUsers(updatedUsers);
+    setRoommates(updatedUsers.filter((u: string) => u.toLowerCase() !== customerName.toLowerCase()));
     setNewRoommateName('');
 
     if (supabase) {
-      const channel = supabase.channel(`table-${tableNumber}`);
+      const channel = supabase.channel(`table:${tableNumber}`);
       channel.send({
         type: 'broadcast',
         event: 'mate_joined',
@@ -539,7 +548,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
       });
     }
 
-    triggerNotification(`👥 ${joined} memindai QR Meja ${tableNumber} & bergabung.`);
+    triggerNotification(`👥 ${joined} bergabung di Meja ${tableNumber}.`);
   };
 
   // Simulate remote update
@@ -938,7 +947,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
                 </span>
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
               </div>
-              <h2 className="text-xs font-black text-[#2C2520] leading-none mt-0.5">Dinikmati oleh: <span className="text-[#8C6239] font-bold underline select-all">{customerName}</span></h2>
+              <h2 className="text-xs font-black text-[#2C2520] leading-none mt-0.5">Dinikmati oleh: <span className="text-[#8C6239] font-bold underline select-all">{activeUsers.length > 0 ? activeUsers.join(', ') : customerName}</span></h2>
             </div>
           </div>
 
@@ -1412,44 +1421,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
         </div>
       )}
 
-      {/* MODAL VALIDASI ANTI-BENTROK DYNAMIC SESSION */}
-      {showOccupiedModal && (
-        <div id="session-anti-collision-popup" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#2C2520]/75 backdrop-blur-xs animate-fadeIn">
-          <div className="w-full max-w-md bg-white rounded-3xl border border-[#FAF2E8] p-6 space-y-5 shadow-2xl animate-scaleIn">
-            <div className="text-center space-y-2">
-              <div className="w-12 h-12 bg-amber-50 text-amber-600 rounded-full flex items-center justify-center mx-auto border border-amber-100">
-                <Users className="w-6 h-6 animate-pulse" />
-              </div>
-              <h3 className="text-sm font-black text-[#1C1612] uppercase tracking-wider">Deteksi Meja Aktif</h3>
-              <p className="text-xs text-[#786455] leading-relaxed">
-                Sistem mendeteksi bahwa <span className="font-extrabold text-[#8C6239]">Meja {tableNumber}</span> saat ini masih digunakan oleh pelanggan aktif sebelumnya.
-              </p>
-            </div>
 
-            <div className="bg-[#FAF8F5] border border-[#EBE3D5] rounded-2xl p-4 text-center space-y-1">
-              <span className="text-[9px] text-gray-400 font-extrabold block uppercase tracking-wider">Pertanyaan Validasi</span>
-              <p className="text-xs font-black text-[#2C2520]">Apakah Anda pelanggan baru di meja ini?</p>
-            </div>
-
-            <div className="flex gap-3">
-              <button
-                type="button"
-                onClick={handleConfirmSameSession}
-                className="flex-1 bg-gray-50 hover:bg-gray-100 text-[#5B4E44] border border-gray-200 py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-colors cursor-pointer"
-              >
-                Tidak, Gabung Sesi
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmNewCustomer}
-                className="flex-1 bg-[#8C6239] hover:bg-[#6D4926] text-white py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-colors cursor-pointer shadow-xs"
-              >
-                Ya, Pelanggan Baru
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* MODAL PIN ADMIN TERSEMBUNYI (HIDDEN GESTURE TRIGGERED) */}
       {showAdminPinModal && (

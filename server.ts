@@ -311,6 +311,316 @@ app.get("/api/jukebox/schema", (req, res) => {
   });
 });
 
+// ==========================================
+// SCANSBITE ORDER SESSION STATE MANAGEMENT
+// ==========================================
+import { createClient } from "@supabase/supabase-js";
+
+const supabaseUrl = process.env.VITE_SUPABASE_URL || 'https://czvmkobgqnasalsgqbeq.supabase.co';
+const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN6dm1rb2JncW5hc2Fsc2dxYmVxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3MzA5MTQsImV4cCI6MjA5NTMwNjkxNH0.50UTHuSIp9BTEC9xx6mWxu5xpAJKJyNw4A19Vl1tU8I';
+const supabaseDB = createClient(supabaseUrl, supabaseAnonKey);
+
+interface OrderSession {
+  session_id: string;
+  tenant_id: string;
+  table_id: string;
+  active_users: string[];
+  cart: any[];
+  status: string;
+  last_active_at: string;
+}
+
+// Resilient fallback in-memory database for multi-device sync
+let memoryOrderSessions: OrderSession[] = [];
+
+function cleanExpiredMemorySessions() {
+  const now = Date.now();
+  const fifteenMinutes = 15 * 60 * 1000;
+  memoryOrderSessions = memoryOrderSessions.filter((sess) => {
+    const elapsed = now - new Date(sess.last_active_at).getTime();
+    if (elapsed > fifteenMinutes) {
+      return false; // remove expired session
+    }
+    return true;
+  });
+}
+
+// Join active ordering session or bootstrap a new one
+app.post("/api/order-sessions/join", async (req, res) => {
+  const { tenant_id, table_id, customer_name } = req.body;
+  if (!tenant_id || !table_id || !customer_name) {
+    return res.status(400).json({ error: "Missing required parameters: tenant_id, table_id, customer_name" });
+  }
+
+  const nowString = new Date().toISOString();
+  const nowMs = Date.now();
+  const fifteenMinutes = 15 * 60 * 1000;
+
+  try {
+    // 1. Check if an active session exists in Supabase 'order_sessions'
+    const { data: dbSessions, error: selectError } = await supabaseDB
+      .from('order_sessions')
+      .select('*')
+      .eq('tenant_id', tenant_id)
+      .eq('table_id', table_id)
+      .eq('status', 'active');
+
+    if (selectError) {
+      throw selectError;
+    }
+
+    let activeSession: any = null;
+
+    if (dbSessions && dbSessions.length > 0) {
+      const sorted = dbSessions.sort((a: any, b: any) => new Date(b.last_active_at).getTime() - new Date(a.last_active_at).getTime());
+      const latest = sorted[0];
+      const elapsed = nowMs - new Date(latest.last_active_at).getTime();
+
+      if (elapsed <= fifteenMinutes) {
+        activeSession = latest;
+      } else {
+        // Session timed out - set status to expired
+        await supabaseDB
+          .from('order_sessions')
+          .update({ status: 'expired' })
+          .eq('id', latest.id);
+      }
+    }
+
+    if (activeSession) {
+      // 2. Add name to array active_users
+      let activeUsers: string[] = [];
+      if (Array.isArray(activeSession.active_users)) {
+        activeUsers = activeSession.active_users;
+      } else if (typeof activeSession.active_users === 'string') {
+        try {
+          activeUsers = JSON.parse(activeSession.active_users);
+        } catch (_) {
+          activeUsers = activeSession.active_users.split(',').map((u: string) => u.trim()).filter(Boolean);
+        }
+      } else if (activeSession.active_users) {
+        activeUsers = [activeSession.active_users];
+      }
+
+      const trimmedName = customer_name.trim();
+      if (!activeUsers.some((u: string) => u.toLowerCase() === trimmedName.toLowerCase())) {
+        activeUsers.push(trimmedName);
+      }
+
+      const { data: updatedSession, error: updateError } = await supabaseDB
+        .from('order_sessions')
+        .update({
+          active_users: activeUsers,
+          last_active_at: nowString
+        })
+        .eq('id', activeSession.id)
+        .select()
+        .single();
+
+      if (updateError) throw updateError;
+      return res.json({ success: true, isNew: false, data: updatedSession, source: 'supabase_db' });
+
+    } else {
+      // 3. Create fresh table ordering session
+      const newSessionId = `sess-${nowMs}-${Math.floor(Math.random() * 1000)}`;
+      const activeUsers = [customer_name.trim()];
+
+      const { data: createdSession, error: insertError } = await supabaseDB
+        .from('order_sessions')
+        .insert({
+          session_id: newSessionId,
+          tenant_id,
+          table_id,
+          active_users: activeUsers,
+          cart: [],
+          status: 'active',
+          last_active_at: nowString
+        })
+        .select()
+        .single();
+
+      if (insertError) {
+        // Fallback: table might use serial/UUID primary key instead of defining custom ID string
+        const { data: fallbackCreated, error: fallbackError } = await supabaseDB
+          .from('order_sessions')
+          .insert({
+            tenant_id,
+            table_id,
+            active_users: activeUsers,
+            cart: [],
+            status: 'active',
+            last_active_at: nowString
+          })
+          .select()
+          .single();
+        if (fallbackError) throw fallbackError;
+        return res.json({ success: true, isNew: true, data: fallbackCreated, source: 'supabase_db' });
+      }
+
+      return res.json({ success: true, isNew: true, data: createdSession, source: 'supabase_db' });
+    }
+
+  } catch (dbError: any) {
+    console.warn("Supabase database order_sessions not accessible. Falling back safely to persistent server memory:", dbError.message || dbError);
+
+    // Safeguard memory cache from leaks
+    cleanExpiredMemorySessions();
+
+    let memorySession = memoryOrderSessions.find(
+      (sess) => sess.tenant_id === tenant_id && sess.table_id === table_id && sess.status === 'active'
+    );
+
+    if (memorySession) {
+      const trimmedName = customer_name.trim();
+      if (!memorySession.active_users.some(u => u.toLowerCase() === trimmedName.toLowerCase())) {
+        memorySession.active_users.push(trimmedName);
+      }
+      memorySession.last_active_at = nowString;
+
+      return res.json({
+        success: true,
+        isNew: false,
+        data: {
+          session_id: memorySession.session_id,
+          tenant_id: memorySession.tenant_id,
+          table_id: memorySession.table_id,
+          active_users: memorySession.active_users,
+          cart: memorySession.cart,
+          status: memorySession.status,
+          last_active_at: memorySession.last_active_at
+        },
+        source: 'memory_cache'
+      });
+    } else {
+      const newSessionId = `sess-${nowMs}-${Math.floor(Math.random() * 1000)}`;
+      const newSess: OrderSession = {
+        session_id: newSessionId,
+        tenant_id,
+        table_id,
+        active_users: [customer_name.trim()],
+        cart: [],
+        status: 'active',
+        last_active_at: nowString
+      };
+
+      memoryOrderSessions.push(newSess);
+
+      return res.json({
+        success: true,
+        isNew: true,
+        data: {
+          session_id: newSess.session_id,
+          tenant_id: newSess.tenant_id,
+          table_id: newSess.table_id,
+          active_users: newSess.active_users,
+          cart: newSess.cart,
+          status: newSess.status,
+          last_active_at: newSess.last_active_at
+        },
+        source: 'memory_cache'
+      });
+    }
+  }
+});
+
+// Update cart items details inside sessional storage
+app.post("/api/order-sessions/cart", async (req, res) => {
+  const { tenant_id, table_id, cart_items } = req.body;
+  if (!tenant_id || !table_id) {
+    return res.status(400).json({ error: "Missing tenant_id and table_id properties." });
+  }
+
+  const nowString = new Date().toISOString();
+
+  try {
+    const { error } = await supabaseDB
+      .from('order_sessions')
+      .update({
+        cart: cart_items,
+        last_active_at: nowString
+      })
+      .eq('tenant_id', tenant_id)
+      .eq('table_id', table_id)
+      .eq('status', 'active');
+
+    if (error) throw error;
+
+    // Sync memory cache replica
+    const mem = memoryOrderSessions.find(s => s.tenant_id === tenant_id && s.table_id === table_id && s.status === 'active');
+    if (mem) {
+      mem.cart = cart_items;
+      mem.last_active_at = nowString;
+    }
+
+    return res.json({ success: true, source: 'supabase_db' });
+  } catch (err: any) {
+    const mem = memoryOrderSessions.find(s => s.tenant_id === tenant_id && s.table_id === table_id && s.status === 'active');
+    if (mem) {
+      mem.cart = cart_items;
+      mem.last_active_at = nowString;
+      return res.json({ success: true, source: 'memory_cache' });
+    }
+    return res.status(404).json({ error: "Active session not found" });
+  }
+});
+
+// Remove a customer from active room list on sessional teardown
+app.post("/api/order-sessions/leave", async (req, res) => {
+  const { tenant_id, table_id, customer_name } = req.body;
+  if (!tenant_id || !table_id || !customer_name) {
+    return res.status(400).json({ error: "Missing required properties" });
+  }
+
+  const nowString = new Date().toISOString();
+
+  try {
+    const { data: sessions } = await supabaseDB
+      .from('order_sessions')
+      .select('*')
+      .eq('tenant_id', tenant_id)
+      .eq('table_id', table_id)
+      .eq('status', 'active');
+
+    if (sessions && sessions.length > 0) {
+      const sess = sessions[0];
+      let activeUsers: string[] = [];
+      if (Array.isArray(sess.active_users)) {
+        activeUsers = sess.active_users;
+      } else if (typeof sess.active_users === 'string') {
+        try {
+          activeUsers = JSON.parse(sess.active_users);
+        } catch (_) {
+          activeUsers = sess.active_users.split(',').map((u: string) => u.trim()).filter(Boolean);
+        }
+      }
+
+      const filtered = activeUsers.filter(u => u.toLowerCase() !== customer_name.trim().toLowerCase());
+      await supabaseDB
+        .from('order_sessions')
+        .update({
+          active_users: filtered,
+          last_active_at: nowString
+        })
+        .eq('id', sess.id);
+    }
+
+    const mem = memoryOrderSessions.find(s => s.tenant_id === tenant_id && s.table_id === table_id && s.status === 'active');
+    if (mem) {
+      mem.active_users = mem.active_users.filter(u => u.toLowerCase() !== customer_name.trim().toLowerCase());
+      mem.last_active_at = nowString;
+    }
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    const mem = memoryOrderSessions.find(s => s.tenant_id === tenant_id && s.table_id === table_id && s.status === 'active');
+    if (mem) {
+      mem.active_users = mem.active_users.filter(u => u.toLowerCase() !== customer_name.trim().toLowerCase());
+      mem.last_active_at = nowString;
+    }
+    return res.json({ success: true, source: 'memory_cache' });
+  }
+});
+
 // 5. Health check route
 app.get("/api/health", (req, res) => {
   res.json({ status: "alive", timestamp: new Date() });

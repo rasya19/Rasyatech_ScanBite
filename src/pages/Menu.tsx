@@ -187,38 +187,60 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
   }, []);
 
   // Check table occupied sessions to prevent customer data mix-up
+  // Check table occupied sessions to prevent customer data mix-up
   const checkTableSession = async () => {
     if (!tableNumber) return;
     
     let mySessionId = localStorage.getItem('scanbite_session_id');
+    const cleanNum = tableNumber.replace('Meja ', '').trim().padStart(2, '0');
     
     if (supabase) {
       try {
-        const { data: activeOrders, error } = await supabase
-          .from('sb_orders')
-          .select('id, status, customer_name, table_number')
-          .or(`table_number.eq."Meja ${tableNumber}",table_number.eq."${tableNumber}"`)
-          .in('status', ['pending', 'preparing']);
-           
-        if (!error && activeOrders && activeOrders.length > 0) {
-          const latestOrder = activeOrders[0];
-          const savedOrders = localStorage.getItem('scanbite_orders');
-          let hasMatched = false;
-          if (savedOrders) {
-            const parsed = JSON.parse(savedOrders);
-            hasMatched = parsed.some((o: any) => o.id === latestOrder.id);
-          }
-          
-          if (!hasMatched) {
-            setOccupiedSessionId(latestOrder.id);
-            setShowOccupiedModal(true);
-            return;
+        // 1. Cek status meja di sb_tables terlebih dahulu
+        const { data: tableData, error: tableError } = await supabase
+          .from('sb_tables')
+          .select('*')
+          .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
+          .maybeSingle();
+
+        const tableStatus = tableData?.status || 'KOSONG';
+
+        if (tableStatus === 'TERISI') {
+          // 2. Jika status adalah TERISI, cari order aktif di sb_orders
+          const { data: activeOrders, error } = await supabase
+            .from('sb_orders')
+            .select('id, status, customer_name, table_number, order_items, payment_status')
+            .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
+            .neq('status', 'completed')
+            .order('created_at', { ascending: false });
+               
+          if (!error && activeOrders && activeOrders.length > 0) {
+            const latestOrder = activeOrders.find(o => o.payment_status !== 'paid');
+            if (latestOrder) {
+              const savedOrders = localStorage.getItem('scanbite_orders');
+              let hasMatched = false;
+              if (savedOrders) {
+                const parsed = JSON.parse(savedOrders);
+                hasMatched = parsed.some((o: any) => o.id === latestOrder.id);
+              }
+              
+              if (!hasMatched) {
+                setOccupiedSessionId(latestOrder.id);
+                setShowOccupiedModal(true);
+                return;
+              }
+            }
           }
         } else {
+          // 3. Jika status KOSONG, mendaftarkan sesi baru dan mengubah status meja menjadi TERISI di sb_tables
           if (!mySessionId) {
             const freshSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
             localStorage.setItem('scanbite_session_id', freshSession);
           }
+          await supabase
+            .from('sb_tables')
+            .update({ status: 'TERISI' })
+            .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`);
         }
       } catch (err) {
         handleLocalSessionCheck(mySessionId);
@@ -262,9 +284,42 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     triggerNotification('🧹 Keranjang dikosongkan! Selamat datang di sesi pemesanan baru.');
   };
 
-  const handleConfirmSameSession = () => {
+  const handleConfirmSameSession = async () => {
     if (occupiedSessionId) {
       localStorage.setItem('scanbite_session_id', occupiedSessionId);
+      localStorage.setItem('scanbite_last_order_id', occupiedSessionId);
+
+      // 4. Pastikan data order_id dari sesi yang sudah ada diambil dan menu itemnya di-restorasi ke cart
+      if (supabase) {
+        try {
+          const { data: activeOrder, error } = await supabase
+            .from('sb_orders')
+            .select('*')
+            .eq('id', occupiedSessionId)
+            .maybeSingle();
+
+          if (!error && activeOrder) {
+            const items = activeOrder.order_items || [];
+            if (items.length > 0) {
+              const mappedCartItems: CartItem[] = items.map((it: any) => {
+                const matchMenu = (menuList || MENU_ITEMS).find(
+                  m => m.name.toLowerCase() === (it.item_name || it.name || '').toLowerCase()
+                );
+                return {
+                  menuItemId: matchMenu?.id || `m${Math.floor(Math.random() * 10)}`,
+                  user: it.ordered_by || it.orderedBy || 'Pelanggan',
+                  quantity: Number(it.quantity) || 1
+                };
+              });
+
+              setCart(mappedCartItems);
+              localStorage.setItem('scanbite_cart', JSON.stringify(mappedCartItems));
+            }
+          }
+        } catch (err: any) {
+          console.warn('Gagal mensinkronisasikan item order lama:', err.message);
+        }
+      }
     }
     setShowOccupiedModal(false);
     triggerNotification('👥 Bergabung dengan sesi pesanan aktif meja.');

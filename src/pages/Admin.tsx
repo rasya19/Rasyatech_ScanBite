@@ -887,6 +887,8 @@ export default function Admin({ onNavigate }: AdminProps) {
       } catch (_) {}
     }
 
+    let liveDbTables: any[] | null = null;
+
     // Try fetching live list of tables from Supabase's sb_tables first to ensure exact sync
     if (supabase) {
       try {
@@ -912,6 +914,7 @@ export default function Admin({ onNavigate }: AdminProps) {
         }
 
         if (!tablesErr && dbTables) {
+          liveDbTables = dbTables;
           const fetchedTables = dbTables
             .map((t: any) => {
               const num = (t.table_number || t.nomor_meja || t.nomor_meja_id || t.id || '').toString().replace('Meja ', '').trim();
@@ -930,13 +933,19 @@ export default function Admin({ onNavigate }: AdminProps) {
 
     setTablesList(activeTables);
 
-    const baseDetails = activeTables.map(num => ({
-      nomor_meja_id: num,
-      nomor_meja: `Meja ${num}`,
-      status: 'KOSONG',
-      session_id: null,
-      nama_pelanggan: '-'
-    }));
+    const baseDetails = activeTables.map(num => {
+      const dbRow = liveDbTables?.find(t => {
+        const tNum = (t.table_number || t.nomor_meja || t.nomor_meja_id || t.id || '').toString().replace('Meja ', '').trim().padStart(2, '0');
+        return tNum === num;
+      });
+      return {
+        nomor_meja_id: num,
+        nomor_meja: `Meja ${num}`,
+        status: dbRow?.status || 'KOSONG',
+        session_id: null,
+        nama_pelanggan: '-'
+      };
+    });
 
     if (!supabase) {
       const savedDetails = localStorage.getItem('scanbite_tables_details');
@@ -962,38 +971,42 @@ export default function Admin({ onNavigate }: AdminProps) {
     }
 
     try {
+      // Fetch orders to display table information correctly (overlaying orders on top of actual table status)
       const { data: ordersData, error } = await supabase
         .from('sb_orders')
         .select('*')
-        .neq('status', 'completed')
-        .neq('status', 'delivered');
+        .neq('status', 'completed');
 
       if (!error && ordersData) {
         const computedDetails = activeTables.map(num => {
+          const dbRow = liveDbTables?.find(t => {
+            const tNum = (t.table_number || t.nomor_meja || t.nomor_meja_id || t.id || '').toString().replace('Meja ', '').trim().padStart(2, '0');
+            return tNum === num;
+          });
+
           const tableOrders = ordersData.filter(o => {
             const mVal = (o.table_number || '').toString();
             return mVal.includes(num) || mVal.includes(parseInt(num).toString());
           });
 
           // Active order has payment_status !== 'paid'
-          const activeOrder = tableOrders.find(o => o.payment_status !== 'paid');
+          const activeOrder = tableOrders.find(o => o.payment_status !== 'paid' && o.status !== 'completed');
 
+          const isTerisiInDb = dbRow?.status === 'TERISI';
+
+          let finalStatus = 'KOSONG';
           if (activeOrder) {
-            return {
-              nomor_meja_id: num,
-              nomor_meja: `Meja ${num}`,
-              status: activeOrder.status === 'pending' ? 'MELAYANI' : 'SEDANG MAKAN',
-              session_id: activeOrder.id,
-              nama_pelanggan: activeOrder.customer_name || '-'
-            };
+            finalStatus = activeOrder.status === 'pending' ? 'MELAYANI' : 'SEDANG MAKAN';
+          } else if (isTerisiInDb) {
+            finalStatus = 'TERISI';
           }
 
           return {
             nomor_meja_id: num,
             nomor_meja: `Meja ${num}`,
-            status: 'KOSONG',
-            session_id: null,
-            nama_pelanggan: '-'
+            status: finalStatus,
+            session_id: activeOrder?.id || null,
+            nama_pelanggan: activeOrder?.customer_name || '-'
           };
         });
 

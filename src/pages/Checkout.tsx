@@ -703,7 +703,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
 
       const { data: insertedOrder, error } = await supabase
         .from('sb_orders')
-        .insert([finalPayload]);
+        .upsert([finalPayload]);
 
       if (error) {
         console.error('❌ Supabase insert error:', error.message);
@@ -789,7 +789,9 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
       }
 
       // 1. KASIR/PELANGGAN: Simpan transaksi terlebih dahulu ke penyimpanan lokal (Offline-First)
-      const generatedId = `ord-${Math.floor(1000 + Math.random() * 9500).toString()}`;
+      const existingSessionId = localStorage.getItem('scanbite_session_id');
+      const isExistingOrder = existingSessionId && (existingSessionId.startsWith('ord-') || existingSessionId.startsWith('sess-'));
+      const generatedId = isExistingOrder ? existingSessionId : `ord-${Math.floor(1000 + Math.random() * 9500).toString()}`;
       const dataTransaksi = {
         id: generatedId,
         table_number: tableNumber,

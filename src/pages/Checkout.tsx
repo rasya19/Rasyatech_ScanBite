@@ -243,10 +243,44 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
 
   const [customerName, setCustomerName] = useState('Pelanggan');
   const [tableNumber, setTableNumber] = useState<string>(() => {
-    const saved = localStorage.getItem('scanbite_table') || '05';
-    const sanitized = saved.replace('Meja ', '').trim();
-    return (!sanitized || sanitized === '-' || sanitized === '00' || sanitized === '0') ? '05' : sanitized.padStart(2, '0');
+    let saved = localStorage.getItem('scanbite_table') || '';
+    if (!saved || saved === '-' || saved === '05' || saved === '0') {
+      try {
+        const localOrders = localStorage.getItem('scanbite_orders');
+        if (localOrders) {
+          const list = JSON.parse(localOrders);
+          if (Array.isArray(list) && list.length > 0) {
+            const latest = list[list.length - 1];
+            if (latest && latest.table_number) {
+              saved = latest.table_number.toString();
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    if (!saved || saved === '-' || saved === '05' || saved === '0') {
+      try {
+        const tableDetails = localStorage.getItem('scanbite_tables_details');
+        if (tableDetails) {
+          const details = JSON.parse(tableDetails);
+          if (Array.isArray(details) && details.length > 0) {
+            const active = details.find(t => t.status !== 'KOSONG');
+            if (active && active.nomor_meja_id) {
+              saved = active.nomor_meja_id;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    const sanitized = saved ? saved.replace('Meja ', '').trim() : '';
+    return (!sanitized || sanitized === '-' || sanitized === '00' || sanitized === '0') 
+      ? (localStorage.getItem('scanbite_table') || '05').replace('Meja ', '').trim().padStart(2, '0') 
+      : sanitized.padStart(2, '0');
   });
+  const [supabaseTableData, setSupabaseTableData] = useState<any>(null);
+  const [showPaymentConfirmModal, setShowPaymentConfirmModal] = useState(false);
+  const [pendingPaymentAction, setPendingPaymentAction] = useState<(() => void) | null>(null);
+  const [paymentSummary, setPaymentSummary] = useState<any | null>(null);
   const [cafeName] = useState(() => localStorage.getItem('scanbite_cafe_name') || 'ScanBite Bistro');
   const [bills, setBills] = useState<UserBill[]>(() => {
     return computeBillsFromCart(cart, MENU_ITEMS);
@@ -296,12 +330,17 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
   const [cashAmount, setCashAmount] = useState<number>(0);
   const [cashInput, setCashInput] = useState<string>('');
 
-  // Reset cash states when modal closes or opens
+  // Reset cash states when modal closes or opens or payment method transitions
   useEffect(() => {
-    setPayMethod('qris');
-    setCashAmount(0);
-    setCashInput('');
-  }, [paymentModalUser, showTreatAllModal]);
+    const activeTotal = paymentModalUser?.grandTotal || totalUnpaidGrandTotal || 0;
+    if (payMethod === 'cash') {
+      setCashAmount(activeTotal);
+      setCashInput(activeTotal.toString());
+    } else {
+      setCashAmount(0);
+      setCashInput('');
+    }
+  }, [paymentModalUser, showTreatAllModal, payMethod]);
 
   // Email Receipt state variables
   const [emailInput, setEmailInput] = useState('');
@@ -377,6 +416,45 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
     };
   }, [tableNumber, lastOrderId]);
 
+  // Live table session status tracking
+  const fetchSupabaseTableData = async () => {
+    if (!supabase || !tableNumber) return;
+    try {
+      const cleanNum = tableNumber.replace('Meja ', '').trim().padStart(2, '0');
+      const { data, error } = await supabase
+        .from('sb_tables')
+        .select('*')
+        .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
+        .maybeSingle();
+      
+      if (!error && data) {
+        setSupabaseTableData(data);
+      } else {
+        setSupabaseTableData({ status: 'TERISI', table_number: tableNumber });
+      }
+    } catch (err) {
+      console.warn('Error inside fetchSupabaseTableData checkout:', err);
+    }
+  };
+
+  useEffect(() => {
+    fetchSupabaseTableData();
+
+    if (!supabase || !tableNumber) return;
+
+    const tablesSubscription = supabase.channel('checkout-tables-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sb_tables' }, () => {
+        fetchSupabaseTableData();
+      })
+      .subscribe();
+
+    return () => {
+      if (supabase) {
+        supabase.removeChannel(tablesSubscription);
+      }
+    };
+  }, [tableNumber]);
+
   // Ripple Animation click handlers
   const [ripples, setRipples] = useState<{ id: number; x: number; y: number }[]>([]);
 
@@ -413,10 +491,38 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
   // 1. Ambil Sesi & Hitung Tagihan dari Supabase / State
   useEffect(() => {
     const savedName = localStorage.getItem('scanbite_customer_name') || 'Pelanggan';
-    const savedTable = localStorage.getItem('scanbite_table') || '05';
     setCustomerName(savedName);
     
-    const sanitizedTable = savedTable.replace('Meja ', '').trim();
+    let savedTable = localStorage.getItem('scanbite_table') || '';
+    if (!savedTable || savedTable === '-' || savedTable === '05' || savedTable === '0') {
+      try {
+        const localOrders = localStorage.getItem('scanbite_orders');
+        if (localOrders) {
+          const list = JSON.parse(localOrders);
+          if (Array.isArray(list) && list.length > 0) {
+            const latest = list[list.length - 1];
+            if (latest && latest.table_number) {
+              savedTable = latest.table_number.toString();
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    if (!savedTable || savedTable === '-' || savedTable === '05' || savedTable === '0') {
+      try {
+        const tableDetails = localStorage.getItem('scanbite_tables_details');
+        if (tableDetails) {
+          const details = JSON.parse(tableDetails);
+          if (Array.isArray(details) && details.length > 0) {
+            const active = details.find(t => t.status !== 'KOSONG');
+            if (active && active.nomor_meja_id) {
+              savedTable = active.nomor_meja_id;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    const sanitizedTable = (savedTable || localStorage.getItem('scanbite_table') || '05').replace('Meja ', '').trim();
     const finalTableNum = (!sanitizedTable || sanitizedTable === '-' || sanitizedTable === '00' || sanitizedTable === '0') ? '05' : sanitizedTable.padStart(2, '0');
     setTableNumber(finalTableNum);
 
@@ -653,6 +759,50 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
     await registerCompletedOrder(updatedBills, `${customerName} (Traktir Se-Meja)`);
   };
 
+  const triggerPayBillConfirmation = (userBill: UserBill) => {
+    const calculatedChange = payMethod === 'cash' ? Math.max(0, cashAmount - userBill.grandTotal) : 0;
+    setPaymentSummary({
+      tableNumber: tableNumber,
+      items: userBill.items.map(i => ({ name: i.name, quantity: i.quantity, total: i.total })),
+      totalAmount: userBill.grandTotal,
+      label: `Pembayaran Mandiri oleh ${userBill.name}`,
+      method: payMethod === 'qris' ? 'QRIS / E-Wallet' : `Tunai / Cash (Uang: ${formatPrice(cashAmount)}, Kembali: ${formatPrice(calculatedChange)})`
+    });
+    setPendingPaymentAction(() => () => {
+      handlePayBill(userBill.name);
+    });
+    setShowPaymentConfirmModal(true);
+  };
+
+  const triggerPayAllBillsConfirmation = () => {
+    const calculatedChange = payMethod === 'cash' ? Math.max(0, cashAmount - totalUnpaidGrandTotal) : 0;
+    
+    const allItems: any[] = [];
+    bills.filter(b => !b.isPaid).forEach(b => {
+      b.items.forEach(i => {
+        const existing = allItems.find(x => x.name === i.name);
+        if (existing) {
+          existing.quantity += i.quantity;
+          existing.total += i.total;
+        } else {
+          allItems.push({ name: i.name, quantity: i.quantity, total: i.total });
+        }
+      });
+    });
+
+    setPaymentSummary({
+      tableNumber: tableNumber,
+      items: allItems,
+      totalAmount: totalUnpaidGrandTotal,
+      label: `Traktir Semua Kawan Se-Meja (Sesi Aktif: ${customerName})`,
+      method: payMethod === 'qris' ? 'QRIS / E-Wallet' : `Tunai / Cash (Uang: ${formatPrice(cashAmount)}, Kembali: ${formatPrice(calculatedChange)})`
+    });
+    setPendingPaymentAction(() => () => {
+      handlePayAllBills();
+    });
+    setShowPaymentConfirmModal(true);
+  };
+
   /**
    * Fungsi placeholder untuk melakukan sinkronisasi data transaksi ke database cloud Supabase.
    * Dirancang khusus untuk diintegrasikan dengan Supabase client di masa mendatang.
@@ -846,6 +996,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
         splitBills: finalBillsState,
         tax: totalTax,
         service: totalService,
+        table_status: supabaseTableData?.status || 'TERISI'
       };
 
       setCompletedOrderDetails(completeOrderInfo);
@@ -1323,7 +1474,9 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
                 EN
               </button>
             </div>
-            <span className="text-xs bg-[#8C6239] text-[#FDFBF7] px-3 py-1 rounded-xl font-black">{t[lang].table} {tableNumber}</span>
+            <span className="text-xs bg-[#8C6239] text-[#FDFBF7] px-3 py-1 rounded-xl font-black">
+              {t[lang].table} {tableNumber} {supabaseTableData ? `(${supabaseTableData.status})` : ''}
+            </span>
           </div>
         </div>
       </header>
@@ -1349,6 +1502,39 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
               <p className="text-[10px] text-[#9E8775] font-semibold">{t[lang].groupBillingSub}</p>
             </div>
           </div>
+
+          {/* GLOBAL PAYMENT METHOD SELECTOR UTAMA */}
+          {bills.length > 0 && (
+            <div className="bg-[#FAF8F5] border border-[#EBE3D5] rounded-2xl p-4 space-y-2 animate-fadeIn">
+              <span className="text-[10px] uppercase font-black text-[#8C6239] tracking-wider block">PILIH METODE PEMBAYARAN UTAMA</span>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPayMethod('qris')}
+                  className={`py-3 px-4 rounded-xl border flex items-center justify-center gap-2 transition-all cursor-pointer text-xs font-bold font-sans ${
+                    payMethod === 'qris'
+                      ? 'bg-[#8C6239] text-[#FDFBF7] border-[#8C6239] shadow-sm'
+                      : 'bg-white text-[#5B4E44] border-[#EBE3D5] hover:bg-gray-50'
+                  }`}
+                >
+                  <CreditCard className="w-4 h-4 shrink-0" />
+                  <span>E-Wallet / QRIS Digital</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPayMethod('cash')}
+                  className={`py-3 px-4 rounded-xl border flex items-center justify-center gap-1.5 transition-all cursor-pointer text-xs font-bold font-sans ${
+                    payMethod === 'cash'
+                      ? 'bg-[#8C6239] text-[#FDFBF7] border-[#8C6239] shadow-sm'
+                      : 'bg-white text-[#5B4E44] border-[#EBE3D5] hover:bg-gray-50'
+                  }`}
+                >
+                  <span className="text-sm">💵</span>
+                  <span>Uang Tunai / Cash</span>
+                </button>
+              </div>
+            </div>
+          )}
 
           {bills.length === 0 ? (
             <div className="p-8 text-center text-[#9E8775]">
@@ -1736,7 +1922,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
               <button
                 type="button"
                 disabled={payMethod === 'cash' && cashAmount < paymentModalUser.grandTotal}
-                onClick={(e) => handleButtonClickWithRipple(e, () => handlePayBill(paymentModalUser.name))}
+                onClick={(e) => handleButtonClickWithRipple(e, () => triggerPayBillConfirmation(paymentModalUser))}
                 className={`relative overflow-hidden text-[#FDFBF7] text-xs font-black uppercase tracking-wider py-3.5 rounded-xl transition-colors shadow-md focus:outline-none ${
                   payMethod === 'cash' && cashAmount < paymentModalUser.grandTotal
                     ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none'
@@ -1919,7 +2105,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
               <button
                 type="button"
                 disabled={payMethod === 'cash' && cashAmount < totalUnpaidGrandTotal}
-                onClick={(e) => handleButtonClickWithRipple(e, () => handlePayAllBills())}
+                onClick={(e) => handleButtonClickWithRipple(e, () => triggerPayAllBillsConfirmation())}
                 className={`relative overflow-hidden text-[#FDFBF7] text-xs font-black uppercase tracking-wider py-3.5 rounded-xl transition-colors shadow-md focus:outline-none ${
                   payMethod === 'cash' && cashAmount < totalUnpaidGrandTotal
                     ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none'
@@ -1930,6 +2116,94 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
                   <CheckCircle2 className="w-4 h-4" />
                   <span>Traktir Lunas</span>
                 </span>
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* CONFIRMATION MODAL BEFORE FINALIZING PAYMENT */}
+      {showPaymentConfirmModal && paymentSummary && (
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 border border-[#F1EADF] shadow-2xl text-center space-y-4 animate-scaleUp">
+            
+            <div className="flex justify-between items-center pb-2 border-b border-[#FAF8F5]">
+              <span className="text-xs font-black text-[#8C6239] uppercase tracking-wide">
+                Konfirmasi Pembayaran
+              </span>
+              <button 
+                type="button"
+                onClick={() => {
+                  setShowPaymentConfirmModal(false);
+                  setPendingPaymentAction(null);
+                  setPaymentSummary(null);
+                }}
+                className="text-gray-400 hover:text-gray-600 focus:outline-none"
+              >
+                <X className="w-4.5 h-4.5" />
+              </button>
+            </div>
+
+            <div className="text-center space-y-1">
+              <span className="text-[10px] bg-[#8C6239]/10 text-[#8C6239] px-3 py-1 rounded-full font-black uppercase tracking-widest leading-none block w-max mx-auto mb-2">
+                Meja {paymentSummary.tableNumber}
+              </span>
+              <h4 className="text-sm font-extrabold text-[#1C1612]">Verifikasi Detail Pesanan</h4>
+              <p className="text-[11px] text-[#786455]">{paymentSummary.label}</p>
+            </div>
+
+            {/* Order Items Summary List */}
+            <div className="bg-[#FAF8F5] border border-[#EBE3D5] rounded-2xl p-4 text-left max-h-48 overflow-y-auto space-y-2">
+              <span className="text-[9.5px] font-black uppercase tracking-wider text-[#9E8775] block border-b border-[#FAF2E8] pb-1">RINGKASAN PESANAN</span>
+              {paymentSummary.items.map((item: any, idx: number) => (
+                <div key={idx} className="flex justify-between text-xs text-[#5B4E44] font-medium py-0.5">
+                  <span>{item.name} <strong className="text-[#8C6239]">x{item.quantity}</strong></span>
+                  <span className="font-mono">{formatPrice(item.total)}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Payment Method & Grand Total Details */}
+            <div className="p-3 bg-[#FAF8F5] border border-[#EBE3D5] rounded-2xl text-left space-y-1.5">
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-[#786455] font-semibold">Metode Pembayaran:</span>
+                <span className="font-extrabold text-[#2C2520]">{paymentSummary.method}</span>
+              </div>
+              <div className="flex justify-between items-center text-xs border-t border-[#EBE3D5]/60 pt-1.5">
+                <span className="text-[#786455] font-semibold">Total Transfer:</span>
+                <span className="text-sm font-black text-emerald-800">{formatPrice(paymentSummary.totalAmount)}</span>
+              </div>
+            </div>
+
+            {/* Confirm Actions */}
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPaymentConfirmModal(false);
+                  setPendingPaymentAction(null);
+                  setPaymentSummary(null);
+                }}
+                className="border border-[#EBE3D5] hover:bg-gray-55 text-[#5B4E44] text-xs font-bold py-3.5 rounded-xl transition-all cursor-pointer"
+              >
+                Batalkan
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  if (pendingPaymentAction) {
+                    await pendingPaymentAction();
+                  }
+                  setShowPaymentConfirmModal(false);
+                  setPendingPaymentAction(null);
+                  setPaymentSummary(null);
+                }}
+                className="relative overflow-hidden bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black uppercase tracking-wider py-3.5 rounded-xl transition-colors shadow-md flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Ya, Konfirmasi</span>
               </button>
             </div>
 

@@ -81,6 +81,10 @@ export const DigitalReceipt: React.FC<DigitalReceiptProps> = ({ orderData, class
           <span className="font-bold text-right">Meja {tableNum}</span>
         </div>
         <div className="flex justify-between">
+          <span className="text-gray-500">STATUS MEJA:</span>
+          <span className="font-bold text-right text-emerald-700 uppercase">{orderData.table_status || orderData.tableStatus || 'TERISI'}</span>
+        </div>
+        <div className="flex justify-between">
           <span className="text-gray-500">PELANGGAN:</span>
           <span className="font-bold text-right uppercase">{custName}</span>
         </div>

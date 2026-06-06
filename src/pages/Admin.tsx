@@ -269,10 +269,8 @@ export default function Admin({ onNavigate }: AdminProps) {
   });
 
   // Live Table grid monitoring statuses
-  const [tablesList, setTablesList] = useState<string[]>(() => {
-    const saved = localStorage.getItem('scanbite_tables');
-    return saved ? JSON.parse(saved) : ['01', '02', '03', '04', '05', '06', '07', '08'];
-  });
+  const [tablesList, setTablesList] = useState<string[]>([]);
+  const [isTablesEmpty, setIsTablesEmpty] = useState<boolean>(false);
   const [tablesData, setTablesData] = useState<any[]>([]);
   const [isAddTableOpen, setIsAddTableOpen] = useState(false);
   const [newTableNum, setNewTableNum] = useState('');
@@ -880,59 +878,32 @@ export default function Admin({ onNavigate }: AdminProps) {
   };
 
   const fetchTables = async () => {
-    // Dynamic retrieval of tables list from localStorage instead of overwriting back to 8 defaults
-    const savedListStr = localStorage.getItem('scanbite_tables');
-    let activeTables: string[] = ['01', '02', '03', '04', '05', '06', '07', '08'];
-    if (savedListStr) {
-      try {
-        activeTables = JSON.parse(savedListStr);
-      } catch (_) {}
-    }
-
+    let activeTables: string[] = [];
     let liveDbTables: any[] | null = null;
 
-    // Try fetching live list of tables from Supabase's sb_tables first to ensure exact sync
     if (supabase) {
       try {
-        const activeTenant = localStorage.getItem('current_tenant') || currentTenant || 'scanbite_live';
-        // Safe query with fallback if tenant_id field is not present
-        let dbTables = null;
-        let tablesErr = null;
-
-        const tenantQuery = await supabase
+        const activeTenant = localStorage.getItem('current_tenant') || 'scanbite_live';
+        const { data: dbTables, error } = await supabase
           .from('sb_tables')
           .select('*')
           .eq('tenant_id', activeTenant);
 
-        if (tenantQuery.error) {
-          const allQuery = await supabase.from('sb_tables').select('*');
-          if (!allQuery.error) {
-            dbTables = allQuery.data;
-          } else {
-            tablesErr = allQuery.error;
-          }
-        } else {
-          dbTables = tenantQuery.data;
-        }
-
-        if (!tablesErr && dbTables) {
+        if (!error && dbTables) {
           liveDbTables = dbTables;
-          const fetchedTables = dbTables
-            .map((t: any) => {
-              const num = (t.table_number || t.nomor_meja || t.nomor_meja_id || t.id || '').toString().replace('Meja ', '').trim();
-              return num.padStart(2, '0');
-            })
+          activeTables = dbTables
+            .map((t: any) => t.table_number?.toString().padStart(2, '0'))
             .filter(Boolean)
             .sort((a, b) => parseInt(a) - parseInt(b));
-
-          activeTables = fetchedTables;
+          
+          setIsTablesEmpty(activeTables.length === 0);
           localStorage.setItem('scanbite_tables', JSON.stringify(activeTables));
         }
       } catch (err: any) {
-        console.warn('Fallback: Could not query live sb_tables from Supabase:', err.message);
+        console.warn('Could not query live sb_tables from Supabase:', err.message);
       }
     }
-
+    
     setTablesList(activeTables);
 
     const baseDetails = activeTables.map(num => {
@@ -1023,66 +994,29 @@ export default function Admin({ onNavigate }: AdminProps) {
     }
   };
 
-  const handleAddTable = async (tableNum: string) => {
-    const formattedNum = tableNum.padStart(2, '0');
+  const initializeTables = async () => {
+    if (!supabase) return;
+    const initialTables = ['01', '03', '05', '08', '12', '18'];
+    const activeTenant = localStorage.getItem('current_tenant') || 'scanbite_live';
     
-    if (tablesList.includes(formattedNum)) {
-      triggerNotification(`❌ Meja ${formattedNum} sudah terdaftar.`);
-      return;
-    }
-
-    const updatedList = [...tablesList, formattedNum].sort((a, b) => parseInt(a) - parseInt(b));
-    setTablesList(updatedList);
-    localStorage.setItem('scanbite_tables', JSON.stringify(updatedList));
-
-    const newTableObj = { nomor_meja_id: formattedNum, nomor_meja: `Meja ${formattedNum}`, status: 'KOSONG', session_id: null, nama_pelanggan: '-' };
-    const updatedDetails = [...tablesData, newTableObj];
-    setTablesData(updatedDetails);
-    localStorage.setItem('scanbite_tables_details', JSON.stringify(updatedDetails));
-
-    if (supabase) {
-      try {
-        const activeTenant = localStorage.getItem('current_tenant') || currentTenant || 'scanbite_live';
-        
-        // 1. Insert into sb_tables table directly! Try all potential columns to be perfectly schema compliant
-        const possibleColumns = ['table_number', 'nomor_meja', 'nomor_meja_id', 'id'];
-        for (const col of possibleColumns) {
-          try {
-            const payload: any = {
-              tenant_id: activeTenant,
-              status: 'KOSONG'
-            };
-            payload[col] = formattedNum;
-            const { error: insErr } = await supabase.from('sb_tables').insert([payload]);
-            if (!insErr) {
-              console.log(`✅ Table successfully inserted into sb_tables matching column ${col}`);
-              break;
-            }
-          } catch (_) {}
-        }
-
-        // 2. Insert into sb_orders placeholder
-        const { error: ordErr } = await supabase.from('sb_orders').insert([
-          {
+    setLoading(true);
+    try {
+        const payload = initialTables.map(num => ({
             tenant_id: activeTenant,
-            table_number: formattedNum,
-            customer_name: 'Registrasi Meja Baru',
-            total_price: 0,
-            status: 'delivered'
-          }
-        ]);
-        if (ordErr) {
-          console.error('Insert to orders failed: ', ordErr.message);
-        }
-        triggerNotification(`🟢 Sukses meregistrasi Meja ${formattedNum} ke database!`);
-      } catch (err: any) {
-        console.warn('Database register exception: ', err.message);
-      }
-    } else {
-      triggerNotification(`✓ Simulasi: Meja ${formattedNum} berhasil didaftarkan offline!`);
+            table_number: num,
+            status: 'KOSONG'
+        }));
+        const { error } = await supabase.from('sb_tables').insert(payload);
+        if (error) throw error;
+        triggerNotification('🟢 Meja berhasil diinisialisasi!');
+        setIsTablesEmpty(false);
+        fetchTables();
+    } catch (err: any) {
+        console.error('❌ Gagal inisialisasi meja:', err);
+        triggerNotification('❌ Gagal inisialisasi meja.');
+    } finally {
+        setLoading(false);
     }
-
-    fetchTables();
   };
 
   const handleDeleteTable = async (tableNum: string) => {
@@ -2647,8 +2581,19 @@ export default function Admin({ onNavigate }: AdminProps) {
               </div>
 
               <div className="max-h-[340px] overflow-y-auto scrollbar-thin pr-1 pb-1.5">
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                  {tablesList.map((num) => {
+                {isTablesEmpty ? (
+                    <div className="flex flex-col items-center justify-center p-10 bg-white border border-dashed border-[#EBE3D5] rounded-2xl w-full">
+                        <p className="text-sm text-[#9E8775] mb-4">Belum ada meja yang terdaftar.</p>
+                        <button
+                            onClick={initializeTables}
+                            className="bg-[#8C6239] text-white px-5 py-3 rounded-xl text-sm font-bold shadow-sm hover:bg-[#6D4926]"
+                        >
+                            Inisialisasi Tabel Meja (01, 03, 05, 08, 12, 18)
+                        </button>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                      {tablesList.map((num) => {
                     const activeTableOrders = orders.filter(o => o.tableNumber === num && o.status !== 'delivered' && o.status !== 'completed');
                     const hasOnlyDeliveredOrders = orders.some(o => o.tableNumber === num && (o.status === 'delivered' || o.status === 'completed')) && 
                                                    !orders.some(o => o.tableNumber === num && o.status !== 'delivered' && o.status !== 'completed');
@@ -2836,10 +2781,9 @@ export default function Admin({ onNavigate }: AdminProps) {
                               </button>
                             </div>
                           );
-                        })()}
-                      </div>
-                    );
-                  })}
+                        })}
+                    </div>
+                )}
                 </div>
               </div>
             </div>

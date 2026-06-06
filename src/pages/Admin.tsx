@@ -1512,8 +1512,14 @@ export default function Admin({ onNavigate }: AdminProps) {
         });
 
         const channel2 = supabase.channel('checkout-orders-live');
-        channel2.subscribe((status) => {
-          // ... (kode di atas)
+
+// 1. Tambahkan kurung kurawal penutup untuk subscribe di sini
+channel2.subscribe((status) => {
+  // ... isi subscribe Bapak ...
+}); // <--- INI WAJIB ADA AGAR SUBSCRIBE TERTUTUP
+
+// 2. Sekarang blok updateStatus Bapak jadi bersih dan tidak error
+const updateStatus = async (orderId, nextStatus) => {
   if (supabase) {
     try {
       const { error } = await supabase
@@ -1527,7 +1533,7 @@ export default function Admin({ onNavigate }: AdminProps) {
       fetchOrders();
     } catch (err: any) {
       alert(`Gagal query update: ${err.message}`);
-    } // <--- KURUNG INI MENUTUP BLOK IF (SUPABASE)
+    }
   } else {
     setOrders((prev) => {
       const updated = prev.map((ord) => 
@@ -1539,7 +1545,6 @@ export default function Admin({ onNavigate }: AdminProps) {
     triggerNotification(`✓ Simulasi: Status pesanan #${orderId} diubah ke ${nextStatus.toUpperCase()}`);
   }
 };
-
   // Bulk archive or delete completed / finalized orders
   const handleClearAllCompletedOrders = async () => {
     const confirmClear = window.confirm(

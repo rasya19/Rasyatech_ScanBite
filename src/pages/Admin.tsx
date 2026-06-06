@@ -2782,11 +2782,13 @@ export default function Admin({ onNavigate }: AdminProps) {
                             </div>
                           );
                         })}
-                    </div>
+                      </div>
+                    );
+                  })}
+                  </div>
                 )}
                 </div>
               </div>
-            </div>
 
             {loading ? (
               <div className="bg-white border border-[#EBE3D5] rounded-3xl p-16 text-center text-[#9E8775]">

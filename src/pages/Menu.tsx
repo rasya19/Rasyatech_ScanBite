@@ -120,8 +120,12 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
   const fetchActiveTableOrder = async () => {
     if (!supabase || !tableNumber) return;
     try {
-      const cleanNum = tableNumber.replace('Meja ', '').trim();
+      const cleanNum = normalizeTableNumber(tableNumber);
       const sessionId = localStorage.getItem('scanbite_session_id');
+      if (!sessionId) {
+        setActiveOrder(null);
+        return;
+      }
 
       const { data, error } = await supabase
         .from('sb_orders')
@@ -140,9 +144,9 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
         if (localSaved) {
           const list = JSON.parse(localSaved);
           const actives = list.filter((o: any) => {
-            const isMatchTable = o.table_number?.toString().replace('Meja ', '').trim() === cleanNum;
-            const isMatchSession = o.session_id === sessionId;
-            return isMatchTable && isMatchSession && ['pending', 'preparing', 'ready'].includes(o.status);
+            const isMatchTable = normalizeTableNumber(o.table_number || o.tableNumber) === cleanNum;
+            const isMatchSession = (o.session_id || o.sessionId || o.id) === sessionId;
+            return isMatchTable && isMatchSession && isActiveOrderStatus(o.status);
           });
           if (actives.length > 0) {
             setActiveOrder(actives[actives.length - 1]);
@@ -187,6 +191,28 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     }, 4500);
   };
 
+  const normalizeTableNumber = (value?: string | number | null) => {
+    const raw = (value ?? '').toString().replace(/^Meja\s*/i, '').trim();
+    if (!raw) return '';
+
+    const numeric = raw.replace(/\D/g, '');
+    return numeric ? numeric.padStart(2, '0') : raw;
+  };
+
+  const isActiveOrderStatus = (status?: string | null) => {
+    return ['pending', 'preparing', 'ready', 'menunggu', 'unpaid'].includes((status || '').toLowerCase());
+  };
+
+  const startFreshCustomerSession = () => {
+    const freshSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    localStorage.setItem('scanbite_session_id', freshSession);
+    localStorage.removeItem('scanbite_last_order_id');
+    localStorage.removeItem('scanbite_checkout_completed');
+    localStorage.removeItem('scanbite_completed_order_details');
+    setActiveOrder(null);
+    return freshSession;
+  };
+
   // Load client parameters on startup
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -213,7 +239,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     if (!tableNumber) return;
     
     let mySessionId = localStorage.getItem('scanbite_session_id');
-    const cleanNum = tableNumber.replace('Meja ', '').trim().padStart(2, '0');
+    const cleanNum = normalizeTableNumber(tableNumber);
     
     if (supabase) {
       try {
@@ -224,45 +250,41 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
           .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
           .maybeSingle();
 
-        const tableStatus = tableData?.status || 'KOSONG';
+        const tableStatus = (tableData?.status || 'KOSONG').toUpperCase();
+        const tableHasSession = ['TERISI', 'MEMILIH', 'MELAYANI', 'SEDANG MAKAN'].includes(tableStatus);
 
-        if (tableStatus === 'TERISI') {
-          // 2. Jika status adalah TERISI, cari order aktif di sb_orders
+        if (tableHasSession) {
+          // 2. Jika meja sedang dipakai, cari hanya order aktif. Order delivered/completed adalah riwayat dan tidak boleh mengunci sesi baru.
           const { data: activeOrders, error } = await supabase
             .from('sb_orders')
-            .select('id, status, customer_name, table_number, order_items, payment_status')
+            .select('id, session_id, status, customer_name, table_number, order_items, payment_status')
             .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
-            .neq('status', 'completed')
+            .in('status', ['pending', 'preparing', 'ready', 'menunggu', 'unpaid'])
             .order('created_at', { ascending: false });
                
           if (!error && activeOrders && activeOrders.length > 0) {
-            const latestOrder = activeOrders.find(o => o.payment_status !== 'paid');
+            const latestOrder = activeOrders.find(o => isActiveOrderStatus(o.status));
             if (latestOrder) {
-              const savedOrders = localStorage.getItem('scanbite_orders');
-              let hasMatched = false;
-              if (savedOrders) {
-                const parsed = JSON.parse(savedOrders);
-                hasMatched = parsed.some((o: any) => o.id === latestOrder.id);
-              }
+              const latestSessionId = latestOrder.session_id || latestOrder.id;
               
-              if (!hasMatched) {
+              if (!mySessionId || mySessionId !== latestSessionId) {
                 setOccupiedSessionId(latestOrder.id);
                 setShowOccupiedModal(true);
                 return;
               }
             }
+          } else if (!mySessionId || localStorage.getItem('scanbite_last_order_id')) {
+            mySessionId = startFreshCustomerSession();
           }
         } else {
-          // 3. Jika status KOSONG, mendaftarkan sesi baru dan mengubah status meja menjadi TERISI di sb_tables
-          if (!mySessionId) {
-            const freshSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-            localStorage.setItem('scanbite_session_id', freshSession);
-          }
-          await supabase
-            .from('sb_tables')
-            .update({ status: 'TERISI' })
-            .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`);
+          // 3. Jika status KOSONG, sesi pelanggan baru harus bersih dan meja cukup ditandai MEMILIH.
+          mySessionId = startFreshCustomerSession();
         }
+
+        await supabase
+          .from('sb_tables')
+          .update({ status: 'MEMILIH' })
+          .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`);
       } catch (err) {
         handleLocalSessionCheck(mySessionId);
       }
@@ -278,10 +300,11 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     
     if (savedOrders) {
       const parsed = JSON.parse(savedOrders);
-      const actives = parsed.filter((o: any) => o.tableNumber === tableNumber && o.status !== 'delivered');
+      const cleanNum = normalizeTableNumber(tableNumber);
+      const actives = parsed.filter((o: any) => normalizeTableNumber(o.tableNumber || o.table_number) === cleanNum && isActiveOrderStatus(o.status));
       if (actives.length > 0) {
         hasActiveLocalOrder = true;
-        localSession = actives[0].sessionId || `sess-old`;
+        localSession = actives[0].sessionId || actives[0].session_id || actives[0].id || `sess-old`;
       }
     }
     
@@ -289,19 +312,24 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
       setOccupiedSessionId(localSession);
       setShowOccupiedModal(true);
     } else {
-      if (!mySessionId) {
-        const freshSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-        localStorage.setItem('scanbite_session_id', freshSession);
+      if (!mySessionId || localStorage.getItem('scanbite_last_order_id')) {
+        startFreshCustomerSession();
       }
     }
   };
 
   const handleConfirmNewCustomer = async () => {
     setCart([]);
-    const brandNewSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    localStorage.setItem('scanbite_session_id', brandNewSession);
+    startFreshCustomerSession();
     setRoommates([]);
     setShowOccupiedModal(false);
+    if (supabase && tableNumber) {
+      const cleanNum = normalizeTableNumber(tableNumber);
+      await supabase
+        .from('sb_tables')
+        .update({ status: 'MEMILIH' })
+        .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`);
+    }
     triggerNotification('🧹 Keranjang dikosongkan! Selamat datang di sesi pemesanan baru.');
   };
 
@@ -355,6 +383,9 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     localStorage.removeItem('scanbite_customer_name');
     localStorage.removeItem('scanbite_table');
     localStorage.removeItem('scanbite_session_id');
+    localStorage.removeItem('scanbite_last_order_id');
+    localStorage.removeItem('scanbite_checkout_completed');
+    localStorage.removeItem('scanbite_completed_order_details');
     localStorage.removeItem('scanbite_orders');
     localStorage.removeItem('scanbite_tables');
     
@@ -364,6 +395,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     setCustomerName('');
     setTableNumber('');
     setCart([]);
+    setActiveOrder(null);
     
     if (typeof onNavigate === 'function') {
       onNavigate('menu');

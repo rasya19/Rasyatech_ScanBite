@@ -4496,7 +4496,6 @@ const updateStatus = async (orderId, nextStatus) => {
             </div>
           </div>
         </div>
-      )}
-    </div>
-  );
-}
+      );      
+      
+    

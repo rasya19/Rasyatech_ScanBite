@@ -2782,7 +2782,9 @@ export default function Admin({ onNavigate }: AdminProps) {
                             </div>
                           );
                         })}
-                    </div>
+                      );
+                    })}
+                  </div>
                 )}
                 </div>
               </div>

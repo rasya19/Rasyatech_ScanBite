@@ -2551,13 +2551,26 @@ export default function Admin({ onNavigate }: AdminProps) {
               const statsActiveOrders = orders.filter(o => o.status === 'pending' || o.status === 'preparing').length;
 
               const statsOccupiedTables = tablesList.filter(num => {
-                const activeTableOrders = orders.filter(o => o.tableNumber === num && o.status !== 'delivered');
-                const hasOnlyDeliveredOrders = orders.some(o => o.tableNumber === num && o.status === 'delivered') && 
-                                               !orders.some(o => o.tableNumber === num && o.status !== 'delivered');
+                const activeTableOrders = orders.filter(o => o.tableNumber === num && o.status !== 'delivered' && o.status !== 'completed');
+                const hasOnlyDeliveredOrders = orders.some(o => o.tableNumber === num && (o.status === 'delivered' || o.status === 'completed')) && 
+                                               !orders.some(o => o.tableNumber === num && o.status !== 'delivered' && o.status !== 'completed');
                 
                 const tblDetail = tablesData.find(t => t.nomor_meja_id === num);
                 const dbStatus = tblDetail?.status || 'KOSONG';
                 
+                const sessionGuest = tblDetail?.nama_pelanggan;
+                const unpaidOrder = orders.find(o => 
+                  o.tableNumber === num && 
+                  o.status !== 'completed' && o.status !== 'delivered' &&
+                  (o.paymentStatus === 'unpaid' || o.paymentStatus?.toLowerCase() === 'unpaid' || o.status === 'unpaid')
+                );
+                const hasActiveOrder = activeTableOrders.length > 0 || !!unpaidOrder;
+                const isSessionEmptyOrPlaceholder = !sessionGuest || sessionGuest === '-' || sessionGuest.toLowerCase().includes('registrasi') || sessionGuest.toLowerCase().includes('baru');
+
+                if (isSessionEmptyOrPlaceholder && !hasActiveOrder) {
+                  return false;
+                }
+
                 let tblStatus = 'KOSONG';
                 if (dbStatus === 'SEDANG MAKAN' || (hasOnlyDeliveredOrders && dbStatus !== 'KOSONG')) {
                   tblStatus = 'SEDANG MAKAN';
@@ -2653,21 +2666,30 @@ export default function Admin({ onNavigate }: AdminProps) {
                     );
                     const isQrisPayment = unpaidOrder && (unpaidOrder.paymentMethod === 'qris' || unpaidOrder.paymentMethod?.toLowerCase() === 'qris' || unpaidOrder.paymentMethod === 'emoney');
 
-                    if (dbStatus === 'SEDANG MAKAN' || (hasOnlyDeliveredOrders && dbStatus !== 'KOSONG')) {
-                      status = 'SEDANG MAKAN';
-                      const matchedOrder = orders.find(o => o.tableNumber === num);
-                      guestName = matchedOrder ? matchedOrder.customerName : (tblDetail?.nama_pelanggan || 'Sajian Disajikan');
-                    } else if (activeTableOrders.length > 0) {
-                      status = 'MELAYANI';
-                      guestName = activeTableOrders[0].customerName;
-                    } else if (dbStatus === 'MEMILIH') {
-                      status = 'MEMILIH';
-                      guestName = tblDetail?.nama_pelanggan || 'Pelanggan Baru';
-                    } else if (dbStatus === 'MELAYANI') {
-                      status = 'MELAYANI';
-                      guestName = tblDetail?.nama_pelanggan || 'Pelanggan';
-                    } else {
+                    const sessionGuest = tblDetail?.nama_pelanggan;
+                    const hasActiveOrder = activeTableOrders.length > 0 || !!unpaidOrder;
+                    const isSessionEmptyOrPlaceholder = !sessionGuest || sessionGuest === '-' || sessionGuest.toLowerCase().includes('registrasi') || sessionGuest.toLowerCase().includes('baru');
+
+                    if (isSessionEmptyOrPlaceholder && !hasActiveOrder) {
                       status = 'KOSONG';
+                      guestName = '-';
+                    } else {
+                      if (dbStatus === 'SEDANG MAKAN' || (hasOnlyDeliveredOrders && dbStatus !== 'KOSONG')) {
+                        status = 'SEDANG MAKAN';
+                        const matchedOrder = orders.find(o => o.tableNumber === num);
+                        guestName = matchedOrder ? matchedOrder.customerName : (tblDetail?.nama_pelanggan || 'Sajian Disajikan');
+                      } else if (activeTableOrders.length > 0) {
+                        status = 'MELAYANI';
+                        guestName = activeTableOrders[0].customerName;
+                      } else if (dbStatus === 'MEMILIH') {
+                        status = 'MEMILIH';
+                        guestName = tblDetail?.nama_pelanggan || 'Pelanggan Baru';
+                      } else if (dbStatus === 'MELAYANI') {
+                        status = 'MELAYANI';
+                        guestName = tblDetail?.nama_pelanggan || 'Pelanggan';
+                      } else {
+                        status = 'KOSONG';
+                      }
                     }
 
                     let statusBg = 'bg-emerald-50/45 border-emerald-250 text-emerald-850';

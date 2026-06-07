@@ -356,22 +356,24 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
   const fetchActiveTableOrder = async () => {
     if (!supabase || !tableNumber) return;
     try {
-      const cleanNum = tableNumber.replace('Meja ', '').trim();
+      const cleanNum = tableNumber.replace('Meja ', '').trim().padStart(2, '0');
       let query = supabase.from('sb_orders').select('*');
       
-      if (lastOrderId) {
-        query = query.eq('id', lastOrderId);
-      } else {
-        query = query
-          .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
-          .in('status', ['pending', 'preparing', 'ready', 'delivered'])
-          .order('created_at', { ascending: false });
-      }
+      // Look up any active/uncompleted session order for this table first so that both users see the same live order!
+      query = query
+        .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
+        .in('status', ['pending', 'preparing', 'ready', 'delivered'])
+        .order('created_at', { ascending: false });
       
       const { data, error } = await query.limit(1);
 
       if (!error && data && data.length > 0) {
         setActiveOrder(data[0]);
+        // Align on the same order ID for real-time split billing cooperation
+        if (data[0].id && data[0].id !== lastOrderId) {
+          setLastOrderId(data[0].id);
+          localStorage.setItem('scanbite_last_order_id', data[0].id);
+        }
       } else {
         // Fallback or read from local scanbite_orders cache for offline testability
         const localSaved = localStorage.getItem('scanbite_orders');
@@ -399,8 +401,17 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
 
     if (!supabase || !tableNumber) return;
 
-    const ordersSubscription = supabase.channel('checkout-orders-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sb_orders' }, () => {
+    const cleanTableNum = tableNumber.replace('Meja ', '').trim().padStart(2, '0');
+
+    // BENAR: Dengarkan SEMUA perubahan di meja/sesi yang sama dengan filter table_number agar seluruh rekan semeja menerima update pembayaran
+    const ordersSubscription = supabase.channel(`table-payment-${cleanTableNum}`)
+      .on('postgres_changes', { 
+        event: '*', 
+        schema: 'public', 
+        table: 'sb_orders',
+        filter: `table_number=eq.${cleanTableNum}`
+      }, (payload) => {
+        console.log("⚡ [REALTIME UPDATE] Deteksi perubahan split-bill/payment meja:", payload);
         fetchActiveTableOrder();
       })
       .on('broadcast', { event: 'order_updated' }, () => {
@@ -711,6 +722,134 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
   }, [jukeboxQueue]);
 
   // 3. Fungsi Bayar Mandiri Bill individual 
+  const syncGroupSplitBillsToSupabase = async (currentBills: UserBill[]) => {
+    if (!supabase || !tableNumber) return;
+    try {
+      const cleanNum = tableNumber.replace('Meja ', '').trim().padStart(2, '0');
+      const orderIdToUse = lastOrderId || `ord-split-${cleanNum}-${Date.now().toString().slice(-4)}`;
+      
+      const totalOrderValue = currentBills.reduce((sum, b) => sum + b.grandTotal, 0);
+      const isAllPaid = currentBills.every(b => b.isPaid);
+      
+      const mappedItems = currentBills.flatMap(b => {
+        const detailPayStr = b.isPaid 
+          ? (b.payMethod === 'cash' ? 'Tunai Lunas' : 'QRIS Lunas')
+          : 'Belum Lunas';
+        return b.items.map(it => ({
+          item_name: it.name,
+          price: it.price,
+          quantity: it.quantity,
+          ordered_by: `${b.name} (${detailPayStr})`
+        }));
+      });
+
+      const customerNameSummary = currentBills
+        .filter(b => b.isPaid)
+        .map(b => b.name)
+        .join(', ') || customerName;
+
+      const payload = {
+        id: orderIdToUse,
+        table_number: cleanNum,
+        customer_name: customerNameSummary,
+        total_price: totalOrderValue,
+        payment_method: payMethod,
+        status: isAllPaid ? 'completed' : 'pending',
+        payment_status: isAllPaid ? 'paid' : 'pending',
+        order_items: mappedItems,
+        split_bills: currentBills,
+        splitBills: currentBills,
+        song_title: activeReceipt?.trackTitle || null,
+        created_at: new Date().toISOString()
+      };
+
+      console.log("🔄 Synchronizing group split-bill to Supabase...", payload.id);
+      const { error } = await supabase.from('sb_orders').upsert([payload]);
+      if (error) {
+        console.warn("Retrying partial sync without JSON columns due to potential rules or schema variation:", error.message);
+        // Fallback: update without split_bills / splitBills json columns
+        await supabase.from('sb_orders').upsert([{
+          id: orderIdToUse,
+          table_number: cleanNum,
+          customer_name: customerNameSummary,
+          total_price: totalOrderValue,
+          payment_method: payMethod,
+          status: isAllPaid ? 'completed' : 'pending',
+          payment_status: isAllPaid ? 'paid' : 'pending',
+          order_items: mappedItems,
+          song_title: activeReceipt?.trackTitle || null,
+          created_at: new Date().toISOString()
+        }]);
+      }
+
+      if (orderIdToUse !== lastOrderId) {
+        setLastOrderId(orderIdToUse);
+        localStorage.setItem('scanbite_last_order_id', orderIdToUse);
+      }
+    } catch (err: any) {
+      console.warn("syncGroupSplitBillsToSupabase error:", err.message);
+    }
+  };
+
+  // Synchronize Supabase activeOrder updates to our local bills state (Split Bill Real-time Sync!)
+  useEffect(() => {
+    if (activeOrder) {
+      // 1. Check if the activeOrder has split_bills or splitBills saved as json
+      const dbSplitBills = activeOrder.split_bills || activeOrder.splitBills;
+      if (Array.isArray(dbSplitBills) && dbSplitBills.length > 0) {
+        console.log("🔄 [REALTIME SYNC] Menerima info split bills dari Supabase:", dbSplitBills);
+        
+        // Merge the isPaid status from database to our local state
+        setBills((prevBills) => {
+          return prevBills.map((localBill) => {
+            const matchedDbBill = dbSplitBills.find(
+              (dbBill: any) => dbBill.name?.toLowerCase().trim() === localBill.name?.toLowerCase().trim()
+            );
+            if (matchedDbBill) {
+              return {
+                ...localBill,
+                isPaid: matchedDbBill.isPaid || matchedDbBill.is_paid || matchedDbBill.status === 'LUNAS' || matchedDbBill.status === 'paid',
+                payMethod: matchedDbBill.payMethod || matchedDbBill.pay_method,
+                cashAmount: matchedDbBill.cashAmount || matchedDbBill.cash_amount || 0,
+                changeAmount: matchedDbBill.changeAmount || matchedDbBill.change_amount || 0
+              };
+            }
+            return localBill;
+          });
+        });
+      } else {
+        // 2. If split_bills is not a direct column, let's parse payment status from mapped order_items!
+        const items = activeOrder.order_items || activeOrder.items || [];
+        if (Array.isArray(items) && items.length > 0) {
+          setBills((prevBills) => {
+            return prevBills.map((localBill) => {
+              // Check if all items for this user in db are marked as Lunas or paid
+              const userItemsInDb = items.filter((it: any) => {
+                const orderedBy = (it.ordered_by || it.orderedBy || '').toLowerCase();
+                return orderedBy.includes(localBill.name.toLowerCase());
+              });
+              
+              if (userItemsInDb.length > 0) {
+                const allUserItemsPaid = userItemsInDb.every((it: any) => {
+                  const orderedBy = (it.ordered_by || it.orderedBy || '').toLowerCase();
+                  return orderedBy.includes('lunas') || orderedBy.includes('paid') || orderedBy.includes('sukses');
+                });
+                
+                if (allUserItemsPaid) {
+                  return {
+                    ...localBill,
+                    isPaid: true
+                  };
+                }
+              }
+              return localBill;
+            });
+          });
+        }
+      }
+    }
+  }, [activeOrder]);
+
   const handlePayBill = async (userName: string) => {
     const userChange = payMethod === 'cash' ? Math.max(0, cashAmount - (paymentModalUser?.grandTotal || 0)) : 0;
     
@@ -734,6 +873,9 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
       changeAmount: userChange
     } : b);
     
+    // Paling penting: Synchronize the partial split bills state to Supabase so other users receive the update in real-time
+    await syncGroupSplitBillsToSupabase(updatedBills);
+
     // Jika SELURUH kawan semeja sudah melunasi tagihannya masing-masing
     if (updatedBills.every((b) => b.isPaid)) {
       await registerCompletedOrder(updatedBills);
@@ -756,6 +898,9 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
     setBills(updatedBills);
     setShowTreatAllModal(false);
     
+    // Synchronize to Supabase immediately
+    await syncGroupSplitBillsToSupabase(updatedBills);
+
     await registerCompletedOrder(updatedBills, `${customerName} (Traktir Se-Meja)`);
   };
 

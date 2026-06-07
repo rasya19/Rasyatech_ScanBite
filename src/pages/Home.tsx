@@ -85,20 +85,20 @@ export default function Home({ onNavigate }: HomeProps) {
       localStorage.setItem('current_tenant', tenant);
     }
     
-    const savedTable = localStorage.getItem('scanbite_table');
+    const savedTable = sessionStorage.getItem('scanbite_table');
     
     if (table) {
       if (savedTable && savedTable !== table) {
         // Mismatch
         if (confirm("Anda sedang memindai meja baru. Ingin ganti meja?")) {
           setTableNumber(table);
-          localStorage.setItem('scanbite_table', table);
+          sessionStorage.setItem('scanbite_table', table);
         } else {
           setTableNumber(savedTable);
         }
       } else {
         setTableNumber(table);
-        localStorage.setItem('scanbite_table', table);
+        sessionStorage.setItem('scanbite_table', table);
       }
     } else if (savedTable) {
         setTableNumber(savedTable);
@@ -126,11 +126,11 @@ export default function Home({ onNavigate }: HomeProps) {
       }
     }
 
-    // Save state to localStorage
-    localStorage.setItem('scanbite_customer_name', customerName.trim());
+    // Save customer session state per tab.
+    sessionStorage.setItem('scanbite_customer_name', customerName.trim());
     localStorage.setItem('scanbite_session_start_time', Date.now().toString());
     if (tableNumber) {
-      localStorage.setItem('scanbite_table', tableNumber);
+      sessionStorage.setItem('scanbite_table', tableNumber);
     }
     
     // Clear error
@@ -194,7 +194,7 @@ export default function Home({ onNavigate }: HomeProps) {
                     key={num}
                     onClick={() => {
                         setTableNumber(num);
-                        localStorage.setItem('scanbite_table', num);
+                        sessionStorage.setItem('scanbite_table', num);
                         setShowTableSelection(false);
                     }}
                     className="p-4 bg-[#FAF8F5] border border-[#EBE3D5] rounded-2xl hover:border-[#8C6239] transition-all font-bold text-[#8C6239]"

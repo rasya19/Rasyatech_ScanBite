@@ -57,17 +57,17 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
   // Page states
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [customerName, setCustomerName] = useState(() => localStorage.getItem('scanbite_customer_name') || '');
+  const [customerName, setCustomerName] = useState(() => sessionStorage.getItem('scanbite_customer_name') || '');
   const [tableNumber, setTableNumber] = useState(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       const queryTable = params.get('table');
       if (queryTable) {
-        localStorage.setItem('scanbite_table', queryTable);
+        sessionStorage.setItem('scanbite_table', queryTable);
         return queryTable;
       }
     }
-    return localStorage.getItem('scanbite_table') || '';
+    return sessionStorage.getItem('scanbite_table') || '';
   });
   const [showAiChef, setShowAiChef] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
@@ -121,7 +121,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     if (!supabase || !tableNumber) return;
     try {
       const cleanNum = tableNumber.replace('Meja ', '').trim();
-      const sessionId = localStorage.getItem('scanbite_session_id');
+      const sessionId = sessionStorage.getItem('scanbite_session_id');
 
       let queryResult = await supabase
         .from('sb_orders')
@@ -241,14 +241,14 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     
     if (queryTable) {
       setTableNumber(queryTable);
-      localStorage.setItem('scanbite_table', queryTable);
+      sessionStorage.setItem('scanbite_table', queryTable);
     }
     if (queryTenant) {
       localStorage.setItem('current_tenant', queryTenant);
     }
 
-    const savedName = localStorage.getItem('scanbite_customer_name');
-    const savedTable = localStorage.getItem('scanbite_table');
+    const savedName = sessionStorage.getItem('scanbite_customer_name');
+    const savedTable = sessionStorage.getItem('scanbite_table');
     if (savedName) setCustomerName(savedName);
     if (!queryTable && savedTable) setTableNumber(savedTable);
   }, []);
@@ -258,7 +258,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
   const checkTableSession = async () => {
     if (!tableNumber) return;
     
-    let mySessionId = localStorage.getItem('scanbite_session_id');
+    let mySessionId = sessionStorage.getItem('scanbite_session_id');
     const cleanNum = tableNumber.replace('Meja ', '').trim().padStart(2, '0');
     
     if (supabase) {
@@ -345,7 +345,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
           if (!mySessionId) {
             const freshSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
             mySessionId = freshSession;
-            localStorage.setItem('scanbite_session_id', freshSession);
+            sessionStorage.setItem('scanbite_session_id', freshSession);
           }
           await supabase
             .from('sb_tables')
@@ -384,7 +384,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     } else {
       if (!mySessionId) {
         const freshSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-        localStorage.setItem('scanbite_session_id', freshSession);
+        sessionStorage.setItem('scanbite_session_id', freshSession);
       }
     }
   };
@@ -392,7 +392,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
   const handleConfirmNewCustomer = async () => {
     setCart([]);
     const brandNewSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    localStorage.setItem('scanbite_session_id', brandNewSession);
+    sessionStorage.setItem('scanbite_session_id', brandNewSession);
     setRoommates([]);
     setShowOccupiedModal(false);
     triggerNotification('🧹 Keranjang dikosongkan! Selamat datang di sesi pemesanan baru.');
@@ -400,7 +400,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
 
   const handleConfirmSameSession = async () => {
     if (occupiedSessionId) {
-      localStorage.setItem('scanbite_session_id', occupiedSessionId);
+      sessionStorage.setItem('scanbite_session_id', occupiedSessionId);
       localStorage.setItem('scanbite_last_order_id', occupiedSessionId);
 
       // 4. Pastikan data order_id dari sesi yang sudah ada diambil dan menu itemnya di-restorasi ke cart
@@ -462,9 +462,9 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     localStorage.removeItem('customer_table');
     localStorage.removeItem('nomor_meja');
     localStorage.removeItem('table_id');
-    localStorage.removeItem('scanbite_customer_name');
-    localStorage.removeItem('scanbite_table');
-    localStorage.removeItem('scanbite_session_id');
+    sessionStorage.removeItem('scanbite_customer_name');
+    sessionStorage.removeItem('scanbite_table');
+    sessionStorage.removeItem('scanbite_session_id');
     localStorage.removeItem('scanbite_orders');
     localStorage.removeItem('scanbite_tables');
     
@@ -1009,8 +1009,8 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
                 return;
               }
 
-              localStorage.setItem('scanbite_customer_name', nameInput);
-              localStorage.setItem('scanbite_table', tableInput);
+              sessionStorage.setItem('scanbite_customer_name', nameInput);
+              sessionStorage.setItem('scanbite_table', tableInput);
               setCustomerName(nameInput);
               setTableNumber(tableInput);
               setSessionError(null);

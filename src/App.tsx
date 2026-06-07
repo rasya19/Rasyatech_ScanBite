@@ -16,8 +16,8 @@ export default function App() {
     if (path === 'menu' || hasTable) return 'menu';
     
     // Redirect customer on '/' if active table session exists
-    const hasSessionName = localStorage.getItem('scanbite_customer_name');
-    const hasSessionTable = localStorage.getItem('scanbite_table');
+    const hasSessionName = sessionStorage.getItem('scanbite_customer_name');
+    const hasSessionTable = sessionStorage.getItem('scanbite_table');
     if (hasSessionName && hasSessionTable) {
       return 'menu';
     }
@@ -34,8 +34,8 @@ export default function App() {
     if (path === 'checkout') return 'checkout';
     if (path === 'menu' || hasTable) return 'menu';
     
-    const hasSessionName = localStorage.getItem('scanbite_customer_name');
-    const hasSessionTable = localStorage.getItem('scanbite_table');
+    const hasSessionName = sessionStorage.getItem('scanbite_customer_name');
+    const hasSessionTable = sessionStorage.getItem('scanbite_table');
     if (hasSessionName && hasSessionTable) {
       return 'menu';
     }
@@ -107,7 +107,7 @@ export default function App() {
   // Handle auto url replacement on root route for active session
   useEffect(() => {
     if (currentPage === 'menu' && (window.location.pathname === '/' || window.location.pathname === '')) {
-      const activeTable = localStorage.getItem('scanbite_table') || '05';
+      const activeTable = sessionStorage.getItem('scanbite_table') || '05';
       window.history.replaceState(null, '', `/menu?tenant=scanbite_live&table=${activeTable}`);
       setCurrentRoute('menu');
       localStorage.setItem('scanbite_current_page', 'menu');

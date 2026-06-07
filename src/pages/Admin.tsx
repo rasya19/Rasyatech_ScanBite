@@ -1140,7 +1140,7 @@ export default function Admin({ onNavigate }: AdminProps) {
           // If we only have table number or fake ID, complete all active & non-completed orders for this table
           const normalNum = parseInt(formattedMeja).toString();
           await supabase.from('sb_orders').update({ status: 'completed', payment_status: 'paid' })
-            .or(`table_number.eq."${formattedMeja}",table_number.eq."${normalNum}",table_number.eq."Meja ${formattedMeja}",table_number.eq."Meja ${normalNum}"`)
+            .in('table_number', [formattedMeja, normalNum, `Meja ${formattedMeja}`, `Meja ${normalNum}`])
             .neq('status', 'completed');
         }
 
@@ -1152,7 +1152,7 @@ export default function Admin({ onNavigate }: AdminProps) {
             const { error: updErr } = await supabase
               .from('sb_tables')
               .update({ status: 'KOSONG' })
-              .or(`${col}.eq."${formattedMeja}",${col}.eq."${normalMejaNum}",${col}.eq."Meja ${formattedMeja}",${col}.eq."Meja ${normalMejaNum}"`);
+              .in(col, [formattedMeja, normalMejaNum, `Meja ${formattedMeja}`, `Meja ${normalMejaNum}`]);
             
             if (!updErr) {
               console.log(`✅ Table status updated in sb_tables matching column ${col}`);

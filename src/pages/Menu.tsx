@@ -123,7 +123,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
       const cleanNum = tableNumber.replace('Meja ', '').trim();
       const sessionId = localStorage.getItem('scanbite_session_id');
 
-      const { data, error } = await supabase
+      let queryResult = await supabase
         .from('sb_orders')
         .select('*')
         .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
@@ -131,6 +131,52 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
         .in('status', ['pending', 'preparing', 'ready'])
         .order('created_at', { ascending: false })
         .limit(1);
+
+      if (queryResult.error) {
+        console.error("fetchActiveTableOrder SELECT query with 'session_id' FAILED:", queryResult.error.message, queryResult.error);
+        
+        // Fallback 1: Query searching by "id" instead of "session_id"
+        queryResult = await supabase
+          .from('sb_orders')
+          .select('*')
+          .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
+          .eq('id', sessionId)
+          .in('status', ['pending', 'preparing', 'ready'])
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (queryResult.error) {
+          console.error("fetchActiveTableOrder Fallback 1 query with 'id' FAILED:", queryResult.error.message, queryResult.error);
+          
+          // Fallback 2: Query without explicit session or id constraint, fallback to just table status and sort
+          queryResult = await supabase
+            .from('sb_orders')
+            .select('*')
+            .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
+            .in('status', ['pending', 'preparing', 'ready'])
+            .order('created_at', { ascending: false })
+            .limit(1);
+
+          if (queryResult.error) {
+            console.error("fetchActiveTableOrder Fallback 2 query FAILED:", queryResult.error.message, queryResult.error);
+            
+            // Fallback 3: Query without 'created_at' sort in case created_at is missing from the database
+            queryResult = await supabase
+              .from('sb_orders')
+              .select('*')
+              .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
+              .in('status', ['pending', 'preparing', 'ready'])
+              .order('id', { ascending: false })
+              .limit(1);
+              
+            if (queryResult.error) {
+              console.error("fetchActiveTableOrder Fallback 3 query without 'created_at' FAILED:", queryResult.error.message, queryResult.error);
+            }
+          }
+        }
+      }
+
+      const { data, error } = queryResult;
 
       if (!error && data && data.length > 0) {
         setActiveOrder(data[0]);
@@ -141,7 +187,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
           const list = JSON.parse(localSaved);
           const actives = list.filter((o: any) => {
             const isMatchTable = o.table_number?.toString().replace('Meja ', '').trim() === cleanNum;
-            const isMatchSession = o.session_id === sessionId;
+            const isMatchSession = o.session_id === sessionId || o.id === sessionId;
             return isMatchTable && isMatchSession && ['pending', 'preparing', 'ready'].includes(o.status);
           });
           if (actives.length > 0) {
@@ -228,12 +274,42 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
 
         if (tableStatus === 'TERISI') {
           // 2. Jika status adalah TERISI, cari order aktif di sb_orders
-          const { data: activeOrders, error } = await supabase
+          let queryResult = await supabase
             .from('sb_orders')
             .select('id, status, customer_name, table_number, order_items, payment_status')
             .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
             .neq('status', 'completed')
             .order('created_at', { ascending: false });
+
+          if (queryResult.error) {
+            console.error("checkTableSession sb_orders select with explicit columns FAILED:", queryResult.error.message, queryResult.error);
+            
+            // Fallback 1: select '*' which avoids error if payment_status or order_items is missing/mismatched in sb_orders
+            queryResult = await supabase
+              .from('sb_orders')
+              .select('*')
+              .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
+              .neq('status', 'completed')
+              .order('created_at', { ascending: false });
+
+            if (queryResult.error) {
+              console.error("checkTableSession sb_orders select '*' with 'created_at' FAILED:", queryResult.error.message, queryResult.error);
+              
+              // Fallback 2: select '*' and order by 'id' in case 'created_at' was the culprit of 400 Bad Request
+              queryResult = await supabase
+                .from('sb_orders')
+                .select('*')
+                .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
+                .neq('status', 'completed')
+                .order('id', { ascending: false });
+
+              if (queryResult.error) {
+                console.error("checkTableSession sb_orders Fallback 2 FAILED:", queryResult.error.message, queryResult.error);
+              }
+            }
+          }
+
+          const { data: activeOrders, error } = queryResult;
                
           if (!error && activeOrders && activeOrders.length > 0) {
             const latestOrder = activeOrders.find(o => o.payment_status !== 'paid');
@@ -318,6 +394,10 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
             .select('*')
             .eq('id', occupiedSessionId)
             .maybeSingle();
+
+          if (error) {
+            console.error("handleConfirmSameSession fetch order from sb_orders FAILED:", error.message, error);
+          }
 
           if (!error && activeOrder) {
             const items = activeOrder.order_items || [];

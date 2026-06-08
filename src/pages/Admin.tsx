@@ -1230,32 +1230,20 @@ export default function Admin({ onNavigate }: AdminProps) {
     
     if (supabase) {
       try {
-        // 1. Update orders status and payment status in Supabase so they are fully resolved
+        // 1. Complete orders using the canonical order status column only.
         if (orderId && !orderId.startsWith('sess-')) {
-          const { error: orderError } = await supabase.from('sb_orders').update({ status: 'completed', payment_status: 'paid' }).eq('id', orderId);
+          const { error: orderError } = await supabase.from('sb_orders').update({ status: 'completed' }).eq('id', orderId);
           if (orderError) {
             console.error("DITOLAK SUPABASE KARENA:", orderError);
-            // Fallback: update only status to completed in case payment_status column does not exist or is malformed
-            const { error: fallbackError } = await supabase.from('sb_orders').update({ status: 'completed' }).eq('id', orderId);
-            if (fallbackError) {
-              console.error("DITOLAK SUPABASE KARENA (FALLBACK GAGAL):", fallbackError);
-            }
           }
         } else {
           // If we only have table number or fake ID, complete all active & non-completed orders for this table
           const normalNum = parseInt(formattedMeja).toString();
-          const { error: orderError } = await supabase.from('sb_orders').update({ status: 'completed', payment_status: 'paid' })
+          const { error: orderError } = await supabase.from('sb_orders').update({ status: 'completed' })
             .in('table_number', [formattedMeja, normalNum, `Meja ${formattedMeja}`, `Meja ${normalNum}`])
             .neq('status', 'completed');
           if (orderError) {
             console.error("DITOLAK SUPABASE KARENA:", orderError);
-            // Fallback: update only status to completed
-            const { error: fallbackError } = await supabase.from('sb_orders').update({ status: 'completed' })
-              .in('table_number', [formattedMeja, normalNum, `Meja ${formattedMeja}`, `Meja ${normalNum}`])
-              .neq('status', 'completed');
-            if (fallbackError) {
-              console.error("DITOLAK SUPABASE KARENA (FALLBACK GAGAL):", fallbackError);
-            }
           }
         }
 
@@ -1266,7 +1254,7 @@ export default function Admin({ onNavigate }: AdminProps) {
           try {
             const { error: updErr } = await supabase
               .from('sb_tables')
-              .update({ status: 'KOSONG' })
+              .update({ status: 'KOSONG', session_id: null, nama_pelanggan: '-' })
               .in(col, [formattedMeja, normalMejaNum, `Meja ${formattedMeja}`, `Meja ${normalMejaNum}`]);
             
             if (!updErr) {
@@ -1317,7 +1305,7 @@ export default function Admin({ onNavigate }: AdminProps) {
         const parsed = JSON.parse(savedOrders);
         const updated = parsed.map((o: any) => 
           (o.id === orderId || (o.table_number === formattedMeja && o.status !== 'completed'))
-            ? { ...o, status: 'completed', payment_status: 'paid' }
+            ? { ...o, status: 'completed' }
             : o
         );
         localStorage.setItem('scanbite_orders', JSON.stringify(updated));

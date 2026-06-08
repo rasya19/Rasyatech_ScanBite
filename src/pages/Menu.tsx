@@ -83,9 +83,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
   const [loadingMenus, setLoadingMenus] = useState(false);
   const [isLiveDatabase, setIsLiveDatabase] = useState(false);
 
-  // Split Bill Roommates
-  const [roommates, setRoommates] = useState<string[]>([]);
-  const [newRoommateName, setNewRoommateName] = useState('');
+  const collectiveCartUser = 'Meja';
   const [showSimulator, setShowSimulator] = useState(false);
   const [showAiModal, setShowAiModal] = useState(false);
   const [activeTab, setActiveTab] = useState<'menu' | 'cart'>('menu');
@@ -121,21 +119,13 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     if (!supabase || !tableNumber) return;
     try {
       const cleanNum = tableNumber.replace('Meja ', '').trim();
-      const sessionId = sessionStorage.getItem('scanbite_session_id');
-
-      let activeOrderQuery = supabase
+      const { data, error } = await supabase
         .from('sb_orders')
         .select('*')
         .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
         .in('status', ['pending', 'preparing', 'ready'])
         .order('created_at', { ascending: false })
         .limit(1);
-
-      if (sessionId) {
-        activeOrderQuery = activeOrderQuery.eq('session_id', sessionId);
-      }
-
-      const { data, error } = await activeOrderQuery;
       if (error) {
         console.error("fetchActiveTableOrder SELECT query FAILED:", error.message, error);
       }
@@ -149,8 +139,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
           const list = JSON.parse(localSaved);
           const actives = list.filter((o: any) => {
             const isMatchTable = o.table_number?.toString().replace('Meja ', '').trim() === cleanNum;
-            const isMatchSession = o.session_id === sessionId || o.id === sessionId;
-            return isMatchTable && isMatchSession && ['pending', 'preparing', 'ready'].includes(o.status);
+            return isMatchTable && ['pending', 'preparing', 'ready'].includes(o.status);
           });
           if (actives.length > 0) {
             setActiveOrder(actives[actives.length - 1]);
@@ -220,7 +209,6 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
   const checkTableSession = async () => {
     if (!tableNumber) return;
     
-    let mySessionId = sessionStorage.getItem('scanbite_session_id');
     const cleanNum = tableNumber.replace('Meja ', '').trim().padStart(2, '0');
     
     if (supabase) {
@@ -232,113 +220,38 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
           .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
           .maybeSingle();
 
-        const tableStatus = tableData?.status || 'KOSONG';
+        if (tableError) {
+          console.warn('checkTableSession sb_tables lookup failed:', tableError.message);
+        }
 
-        if (tableStatus === 'TERISI') {
-          // 2. Jika status adalah TERISI, cari order aktif di sb_orders
-          const { data: activeOrders, error } = await supabase
-            .from('sb_orders')
-            .select('id, session_id, status, customer_name, table_number, order_items')
-            .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`)
-            .neq('status', 'completed')
-            .neq('status', 'paid')
-            .order('created_at', { ascending: false });
-
-          if (error) {
-            console.error("checkTableSession sb_orders select FAILED:", error.message, error);
-          }
-               
-          if (!error && activeOrders && activeOrders.length > 0) {
-            const latestOrder = activeOrders[0];
-            if (latestOrder) {
-              const latestSessionId = latestOrder.session_id || latestOrder.id;
-              const savedOrders = localStorage.getItem('scanbite_orders');
-              let hasMatched = false;
-              if (savedOrders) {
-                const parsed = JSON.parse(savedOrders);
-                hasMatched = parsed.some((o: any) => o.id === latestOrder.id);
-              }
-              
-              if (!hasMatched) {
-                // Ensure we don't block ourselves if our local session ID matches the active order ID
-                if (mySessionId !== latestSessionId) {
-                  setOccupiedSessionId(latestSessionId);
-                  setShowOccupiedModal(true);
-                  return;
-                }
-              }
-            }
-          }
-
-          // Fallback / Extra Check: If no active order exists in sb_orders yet but table has an active session_id in sb_tables
-          if (tableData?.session_id) {
-            if (mySessionId !== tableData.session_id) {
-              setOccupiedSessionId(tableData.session_id);
-              setShowOccupiedModal(true);
-              return;
-            }
-          }
-        } else {
-          // 3. Jika status KOSONG, mendaftarkan sesi baru dan mengubah status meja menjadi TERISI di sb_tables
-          if (!mySessionId) {
-            const freshSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-            mySessionId = freshSession;
-            sessionStorage.setItem('scanbite_session_id', freshSession);
-          }
+        if (!tableData || tableData.status === 'KOSONG') {
           await supabase
             .from('sb_tables')
             .update({ 
               status: 'TERISI',
-              session_id: mySessionId,
-              nama_pelanggan: customerName || 'Pelanggan Utama'
+              session_id: null,
+              nama_pelanggan: customerName || 'Pelanggan Meja'
             })
             .or(`table_number.eq."Meja ${cleanNum}",table_number.eq."${cleanNum}"`);
         }
       } catch (err) {
-        handleLocalSessionCheck(mySessionId);
+        handleLocalSessionCheck();
       }
     } else {
-      handleLocalSessionCheck(mySessionId);
+      handleLocalSessionCheck();
     }
   };
 
-  const handleLocalSessionCheck = (mySessionId: string | null) => {
-    const savedOrders = localStorage.getItem('scanbite_orders');
-    let hasActiveLocalOrder = false;
-    let localSession = '';
-    
-    if (savedOrders) {
-      const parsed = JSON.parse(savedOrders);
-      const actives = parsed.filter((o: any) => o.tableNumber === tableNumber && o.status !== 'delivered');
-      if (actives.length > 0) {
-        hasActiveLocalOrder = true;
-        localSession = actives[0].sessionId || `sess-old`;
-      }
-    }
-    
-    if (hasActiveLocalOrder && (!mySessionId || mySessionId !== localSession)) {
-      setOccupiedSessionId(localSession);
-      setShowOccupiedModal(true);
-    } else {
-      if (!mySessionId) {
-        const freshSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-        sessionStorage.setItem('scanbite_session_id', freshSession);
-      }
-    }
-  };
+  const handleLocalSessionCheck = () => {};
 
   const handleConfirmNewCustomer = async () => {
     setCart([]);
-    const brandNewSession = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    sessionStorage.setItem('scanbite_session_id', brandNewSession);
-    setRoommates([]);
     setShowOccupiedModal(false);
     triggerNotification('🧹 Keranjang dikosongkan! Selamat datang di sesi pemesanan baru.');
   };
 
   const handleConfirmSameSession = async () => {
     if (occupiedSessionId) {
-      sessionStorage.setItem('scanbite_session_id', occupiedSessionId);
       localStorage.setItem('scanbite_last_order_id', occupiedSessionId);
 
       // 4. Pastikan data order_id dari sesi yang sudah ada diambil dan menu itemnya di-restorasi ke cart
@@ -347,7 +260,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
           const { data: activeOrder, error } = await supabase
             .from('sb_orders')
             .select('*')
-            .eq('session_id', occupiedSessionId)
+            .eq('id', occupiedSessionId)
             .neq('status', 'completed')
             .neq('status', 'paid')
             .order('created_at', { ascending: false })
@@ -367,7 +280,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
                 );
                 return {
                   menuItemId: matchMenu?.id || `m${Math.floor(Math.random() * 10)}`,
-                  user: it.ordered_by || it.orderedBy || 'Pelanggan',
+                  user: collectiveCartUser,
                   quantity: Number(it.quantity) || 1
                 };
               });
@@ -551,29 +464,28 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
 
     channel
       .on('broadcast', { event: 'item_added' }, (payload: any) => {
-        const { user, itemName, itemId } = payload.payload;
+        const { itemName, itemId } = payload.payload;
         
-        triggerNotification(`⚡ ${user} memasukkan "${itemName}" ke keranjang meja.`);
+        triggerNotification(`⚡ "${itemName}" ditambahkan ke keranjang meja.`);
         
-        // Append item to state for shared multi-user checkout simulation
+        // Append item to the single collective table cart.
         setCart((prevCart) => {
           const existing = prevCart.find(
-            (ci) => ci.menuItemId === itemId && ci.user === user
+            (ci) => ci.menuItemId === itemId
           );
           if (existing) {
             return prevCart.map((ci) => 
-              ci.menuItemId === itemId && ci.user === user
+              ci.menuItemId === itemId
                 ? { ...ci, quantity: ci.quantity + 1 }
                 : ci
             );
           }
-          return [...prevCart, { menuItemId: itemId, user, quantity: 1 }];
+          return [...prevCart, { menuItemId: itemId, user: collectiveCartUser, quantity: 1 }];
         });
       })
       .on('broadcast', { event: 'mate_joined' }, (payload: any) => {
         const { user } = payload.payload;
         triggerNotification(`👥 ${user} telah memindai QR & bergabung di Meja ${cleanNum}!`);
-        setRoommates(prev => prev.includes(user) ? prev : [...prev, user]);
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
@@ -592,19 +504,19 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
   }, [tableNumber, customerName]);
 
   // Handle Add Item to Cart
-  const handleAddToCart = (item: MenuItem, targetUser: string = customerName) => {
+  const handleAddToCart = (item: MenuItem) => {
     setCart((prevCart) => {
       const existing = prevCart.find(
-        (ci) => ci.menuItemId === item.id && ci.user === targetUser
+        (ci) => ci.menuItemId === item.id
       );
       if (existing) {
         return prevCart.map((ci) => 
-          ci.menuItemId === item.id && ci.user === targetUser
+          ci.menuItemId === item.id
             ? { ...ci, quantity: ci.quantity + 1 }
             : ci
         );
       }
-      return [...prevCart, { menuItemId: item.id, user: targetUser, quantity: 1 }];
+      return [...prevCart, { menuItemId: item.id, user: collectiveCartUser, quantity: 1 }];
     });
 
     // Send Broadcast to other diners if Supabase Channel is up
@@ -614,26 +526,26 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
       channel.send({
         type: 'broadcast',
         event: 'item_added',
-        payload: { user: targetUser, itemName: item.name, itemId: item.id }
+        payload: { itemName: item.name, itemId: item.id }
       });
     }
 
-    triggerNotification(`✓ "${item.name}" ditambahkan atas nama ${targetUser}!`);
+    triggerNotification(`✓ "${item.name}" ditambahkan ke keranjang meja!`);
   };
 
   // Decrease item quantity
-  const handleRemoveFromCart = (itemId: string, targetUser: string = customerName) => {
+  const handleRemoveFromCart = (itemId: string) => {
     setCart((prevCart) => {
       const existing = prevCart.find(
-        (ci) => ci.menuItemId === itemId && ci.user === targetUser
+        (ci) => ci.menuItemId === itemId
       );
       if (!existing) return prevCart;
       
       if (existing.quantity === 1) {
-        return prevCart.filter((ci) => !(ci.menuItemId === itemId && ci.user === targetUser));
+        return prevCart.filter((ci) => ci.menuItemId !== itemId);
       }
       return prevCart.map((ci) => 
-        ci.menuItemId === itemId && ci.user === targetUser
+        ci.menuItemId === itemId
           ? { ...ci, quantity: ci.quantity - 1 }
           : ci
       );
@@ -650,38 +562,9 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
     }, 0);
   };
 
-  // Add Interactive Roommate local form
-  const handleAddRoommate = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newRoommateName.trim()) return;
-    if (roommates.includes(newRoommateName.trim()) || newRoommateName.trim() === customerName) {
-      triggerNotification('Nama tersebut sudah bergabung di meja Anda.');
-      return;
-    }
-    const joined = newRoommateName.trim();
-    setRoommates([...roommates, joined]);
-    setNewRoommateName('');
-
-    if (supabase) {
-      const cleanNum = tableNumber.replace('Meja ', '').trim().padStart(2, '0');
-      const channel = supabase.channel(`table-${cleanNum}`);
-      channel.send({
-        type: 'broadcast',
-        event: 'mate_joined',
-        payload: { user: joined }
-      });
-    }
-
-    triggerNotification(`👥 ${joined} memindai QR Meja ${tableNumber} & bergabung.`);
-  };
-
-  // Simulate remote update
   const handleSimulateRoommateOrder = () => {
-    if (roommates.length === 0) return;
-    const randomFriend = roommates[Math.floor(Math.random() * roommates.length)];
     const randomMenu = menuList[Math.floor(Math.random() * menuList.length)];
-
-    handleAddToCart(randomMenu, randomFriend);
+    handleAddToCart(randomMenu);
   };
 
   // Handle 5-click hidden gesture on Table number component
@@ -849,39 +732,10 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
                       <p className="text-[10px] text-[#786455] leading-relaxed line-clamp-2">{item.description}</p>
                     </div>
 
-                    {/* Room splits tags */}
-                    <div className="mt-3.5 pt-2.5 border-t border-[#FAF8F5] flex items-center justify-between gap-2">
-                      <div>
-                        <p className="text-[7.5px] text-[#9E8775] font-black uppercase tracking-wider mb-1 leading-none font-mono">Pesan Atas Nama:</p>
-                        <div className="flex items-center gap-1 overflow-x-auto max-w-[120px] scrollbar-none py-0.5">
-                          {/* Self user button */}
-                          <button
-                            type="button"
-                            onClick={() => handleAddToCart(item, customerName)}
-                            title={`Pesan untuk Anda (${customerName})`}
-                            className="w-5.5 h-5.5 rounded-full bg-[#8C6239] text-[#FDFBF7] text-[9.5px] font-black flex items-center justify-center transition-all shadow-2xs shrink-0 select-none uppercase hover:brightness-110 cursor-pointer"
-                          >
-                            {customerName[0]}
-                          </button>
-
-                          {/* Diners buttons */}
-                          {roommates.map((name, i) => (
-                            <button
-                              key={i}
-                              type="button"
-                              onClick={() => handleAddToCart(item, name)}
-                              title={`Pesan untuk ${name}`}
-                              className="w-5.5 h-5.5 rounded-full bg-[#FAF2E8] border border-[#EBE3D5] text-[#8C6239] text-[8.5px] font-bold flex items-center justify-center transition-all shrink-0 uppercase hover:bg-[#8C6239] hover:text-white cursor-pointer"
-                            >
-                              {name[0]}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
+                    <div className="mt-3.5 pt-2.5 border-t border-[#FAF8F5] flex items-center justify-end gap-2">
                       <button
                         type="button"
-                        onClick={() => handleAddToCart(item, customerName)}
+                        onClick={() => handleAddToCart(item)}
                         className="px-2.5 py-1.5 bg-[#FAF2E8] text-[#8C6239] hover:bg-[#8C6239] hover:text-white rounded-lg text-[10.5px] font-black transition-all flex items-center gap-0.5 cursor-pointer shadow-3xs"
                       >
                         <Plus className="w-3.5 h-3.5" />
@@ -1227,7 +1081,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
             {/* Column Branding Footer */}
             <div className="pt-6 mt-auto border-t border-[#FAF2E8]/60 text-center text-[10px] text-[#9E8775]/90 font-sans shrink-0 animate-fadeIn">
               <p className="font-semibold">© 2026 {localStorage.getItem('scanbite_cafe_name') || 'ScanBite Bistro'}. All rights reserved.</p>
-              <p className="opacity-75 mt-0.5 animate-pulse">Powered by RasyaTech | Vibe Modern • Digital Jukebox • Real-time Split Billing</p>
+              <p className="opacity-75 mt-0.5 animate-pulse">Powered by RasyaTech | Vibe Modern • Digital Jukebox • Table Ordering</p>
             </div>
           </div>
         )}
@@ -1236,56 +1090,26 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
         {activeTab === 'cart' && (
           <div className="w-full flex-1 flex flex-col h-full overflow-y-auto p-4 space-y-5 pb-28 bg-[#FAF8F5] animate-fadeIn">
             
-            {/* Section 2: Active Shared Room & Friend Ordering Simulator */}
+            {/* Section 2: Active collective table cart */}
             <div className="bg-white rounded-3xl p-5 border border-[#EBE3D5] shadow-xs">
               <div className="flex items-center justify-between mb-3.5">
                 <div className="flex items-center gap-2">
                   <div className="w-8 h-8 rounded-xl bg-amber-50 text-[#8C6239] flex items-center justify-center border border-[#FAF2E8]">
-                    <Users className="w-4 h-4" />
+                    <ShoppingCart className="w-4 h-4" />
                   </div>
                   <div>
-                    <h3 className="font-black text-[#1C1612] text-xs uppercase tracking-wider">Meja {tableNumber} Shared Room</h3>
+                    <h3 className="font-black text-[#1C1612] text-xs uppercase tracking-wider">Keranjang Kolektif Meja {tableNumber}</h3>
                     <p className="text-[10px] text-emerald-600 font-extrabold flex items-center gap-1 leading-none mt-0.5 font-mono">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> PWA Real-time Sync
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Satu pesanan untuk satu meja
                     </p>
                   </div>
                 </div>
               </div>
 
-              {/* Roommate details list */}
-              <div className="space-y-2">
-                <div className="bg-[#FAF8F5] border border-[#EBE3D5] rounded-xl px-3 py-2 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-[#8C6239]" />
-                    <span className="text-xs font-black text-[#2C2520]">{customerName} (Anda)</span>
-                  </div>
-                  <span className="text-[8px] bg-[#8C6239]/10 text-[#8C6239] px-2 py-0.5 rounded-full font-black uppercase tracking-wider font-mono">Host</span>
-                </div>
+              <p className="text-xs text-[#786455] leading-relaxed">
+                Semua hidangan digabung dalam satu keranjang meja. Tidak ada pemisahan nama pelanggan atau sesi.
+              </p>
 
-                {roommates.map((name, idx) => {
-                  const companionQtySum = cart
-                    .filter((ci) => ci.user === name)
-                    .reduce((acc, ci) => acc + ci.quantity, 0);
-
-                  return (
-                    <div key={idx} className="bg-white border border-[#F1EADF] rounded-xl px-3 py-2 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-[#9E8775]" />
-                        <span className="text-xs font-bold text-[#5B4E44]">{name}</span>
-                      </div>
-                      {companionQtySum > 0 ? (
-                        <span className="text-[9.5px] font-black text-[#8C6239] bg-[#FAF2E8] px-2 py-0.5 rounded-md font-mono">
-                          {companionQtySum} Item
-                        </span>
-                      ) : (
-                        <span className="text-[8.5px] text-[#9E8775] italic">Sedang memilih...</span>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Collapsible Simulator Box */}
               <div className="border border-amber-200/55 bg-amber-50/20 rounded-2xl p-2.5 mt-3.5 select-none text-left">
                 <button
                   type="button"
@@ -1294,7 +1118,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
                 >
                   <span className="flex items-center gap-1.5 font-sans">
                     <Sliders className="w-3.5 h-3.5 text-[#8C6239]" />
-                    <span>Simulasi Testing</span>
+                    <span>Simulasi Tambah Item</span>
                   </span>
                   <span className="text-[9px] bg-white border border-amber-200/40 px-1.5 py-0.5 rounded-md leading-none font-mono font-black">
                     {showSimulator ? 'TUTUP ✕' : 'BUKA ⚙️'}
@@ -1303,35 +1127,14 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
                 
                 {showSimulator && (
                   <div className="mt-3.5 pt-3 border-t border-amber-200/40 space-y-3 animate-fadeIn">
-                    {/* Simulate remote roommate order button */}
-                    {roommates.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={handleSimulateRoommateOrder}
-                        className="w-full bg-white hover:bg-[#FAF8F5] border border-dashed border-[#8C6239] text-[#8C6239] py-1.5 px-3 rounded-xl font-black text-[9.5px] flex items-center justify-center gap-1 transition-all uppercase tracking-wider shadow-3xs cursor-pointer font-sans"
-                      >
-                        <Users className="w-3.5 h-3.5" />
-                        <span>Simulasi Teman Memesan</span>
-                      </button>
-                    )}
-
-                    {/* Quick roommate join input */}
-                    <form onSubmit={handleAddRoommate} className="flex gap-1.5">
-                      <input
-                        type="text"
-                        placeholder="Nama kawan..."
-                        required
-                        value={newRoommateName}
-                        onChange={(e) => setNewRoommateName(e.target.value)}
-                        className="flex-1 bg-white border border-[#EBE3D5] rounded-xl px-2.5 py-2 text-xs placeholder-[#B2A494] focus:outline-none focus:ring-1 focus:ring-[#8C6239] font-sans"
-                      />
-                      <button
-                        type="submit"
-                        className="bg-[#FAF2E8] text-[#8C6239] hover:bg-[#8C6239] hover:text-white border border-[#EBE3D5] font-black rounded-xl px-3 transition-all text-xs cursor-pointer font-sans"
-                      >
-                        Gabung
-                      </button>
-                    </form>
+                    <button
+                      type="button"
+                      onClick={handleSimulateRoommateOrder}
+                      className="w-full bg-white hover:bg-[#FAF8F5] border border-dashed border-[#8C6239] text-[#8C6239] py-1.5 px-3 rounded-xl font-black text-[9.5px] flex items-center justify-center gap-1 transition-all uppercase tracking-wider shadow-3xs cursor-pointer font-sans"
+                    >
+                      <ShoppingCart className="w-3.5 h-3.5" />
+                      <span>Tambah Item Acak ke Keranjang</span>
+                    </button>
                   </div>
                 )}
               </div>
@@ -1374,18 +1177,18 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
                       <div key={idx} className="flex items-center justify-between text-xs py-1.5 border-b border-[#FAF2E8] last:border-b-0">
                         <div className="flex-1 min-w-0 pr-2">
                           <p className="font-black text-[#2C2520] truncate">{menu.name}</p>
-                          <p className="text-[9.5px] text-[#9E8775] font-bold">Oleh: <span className="text-[#8C6239] font-black uppercase">{item.user}</span></p>
+                          <p className="text-[9.5px] text-[#9E8775] font-bold">Keranjang kolektif meja</p>
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
                           <button 
-                            onClick={() => handleRemoveFromCart(item.menuItemId, item.user)}
+                            onClick={() => handleRemoveFromCart(item.menuItemId)}
                             className="w-5 h-5 bg-[#FAF2E8] text-[#8C6239] hover:bg-[#8C6239] hover:text-white rounded-lg flex items-center justify-center font-black cursor-pointer"
                           >
                             -
                           </button>
                           <span className="font-black text-[#2C2520] min-w-4 text-center font-mono">{item.quantity}</span>
                           <button 
-                            onClick={() => handleAddToCart(menu, item.user)}
+                            onClick={() => handleAddToCart(menu)}
                             className="w-5 h-5 bg-[#FAF2E8] text-[#8C6239] hover:bg-[#8C6239] hover:text-white rounded-lg flex items-center justify-center font-black cursor-pointer"
                           >
                             +
@@ -1436,7 +1239,7 @@ export default function Menu({ onNavigate, cart, setCart }: MenuProps) {
             {/* Column Branding Footer */}
             <div className="pt-6 mt-auto text-center text-[10px] text-[#9E8775]/90 font-sans shrink-0 animate-fadeIn">
               <p className="font-semibold">© 2026 {localStorage.getItem('scanbite_cafe_name') || 'ScanBite Bistro'}. All rights reserved.</p>
-              <p className="opacity-75 mt-0.5 animate-pulse">Powered by RasyaTech | Vibe Modern • Digital Jukebox • Real-time Split Billing</p>
+              <p className="opacity-75 mt-0.5 animate-pulse">Powered by RasyaTech | Vibe Modern • Digital Jukebox • Table Ordering</p>
             </div>
 
           </div>

@@ -29,19 +29,16 @@ interface CheckoutProps {
   setCart: React.Dispatch<React.SetStateAction<CartItem[]>>;
 }
 
-// Global helper for instant sessional cart price computation
+// Global helper for one collective table-cart price computation
 const computeBillsFromCart = (cart: CartItem[], menuItemsList: any[]) => {
-  const grouped: { [key: string]: any[] } = {};
+  const items: any[] = [];
   
   cart.forEach((item) => {
     const menu = menuItemsList?.find((m) => m.id?.toString() === item.menuItemId?.toString());
     const price = menu ? menu.price : 25000;
     const name = menu ? menu.name : `Menu #${item.menuItemId}`;
 
-    if (!grouped[item.user]) {
-      grouped[item.user] = [];
-    }
-    grouped[item.user].push({
+    items.push({
       name,
       price,
       quantity: item.quantity,
@@ -49,23 +46,22 @@ const computeBillsFromCart = (cart: CartItem[], menuItemsList: any[]) => {
     });
   });
 
-  return Object.keys(grouped).map((userName) => {
-    const items = grouped[userName];
-    const subtotal = items.reduce((sum, i) => sum + i.total, 0);
-    const taxRate = Number(localStorage.getItem('scanbite_tax_percent') || '10') / 100;
-    const serviceRate = Number(localStorage.getItem('scanbite_service_charge_percent') || '5') / 100;
-    const taxAndService = Math.round(subtotal * (taxRate + serviceRate));
-    const grandTotal = subtotal + taxAndService;
-    
-    return {
-      name: userName,
-      items,
-      subtotal,
-      taxAndService,
-      grandTotal,
-      isPaid: false
-    };
-  });
+  if (items.length === 0) return [];
+
+  const subtotal = items.reduce((sum, i) => sum + i.total, 0);
+  const taxRate = Number(localStorage.getItem('scanbite_tax_percent') || '10') / 100;
+  const serviceRate = Number(localStorage.getItem('scanbite_service_charge_percent') || '5') / 100;
+  const taxAndService = Math.round(subtotal * (taxRate + serviceRate));
+  const grandTotal = subtotal + taxAndService;
+  
+  return [{
+    name: 'Tagihan Meja',
+    items,
+    subtotal,
+    taxAndService,
+    grandTotal,
+    isPaid: false
+  }];
 };
 
 function getDynamicDenominations(totalAmount: number): number[] {
@@ -156,18 +152,18 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
     id: {
       back: 'Kembali',
       headerTitle: 'BILLING & JUKEBOX DETAIL',
-      headerSub: 'Split-Bill Pintar Autentik',
+      headerSub: 'Tagihan Meja Sederhana',
       table: 'Meja',
       unpaidGrandTotal: 'Total Belum Lunas',
-      groupBilling: 'Meja Pembayaran Bersama',
-      groupBillingSub: 'Bayar hidangan pribadi Anda secara lunas mandiri atau traktir kawan semeja',
+      groupBilling: 'Tagihan Kolektif Meja',
+      groupBillingSub: 'Semua hidangan digabung menjadi satu pesanan untuk meja ini',
       cartEmpty: 'Keranjang belanja kosong',
       cartEmptySub: 'Silakan klik pesan menu santapan di halaman depan terlebih dahulu.',
       paid: 'LUNAS',
-      payOwn: 'Bayar Mandiri',
-      treatAll: 'Traktir Semua Kawan Se-Meja',
-      treatAllSub: 'Tanggung seluruh tagihan yang belum lunas dalam satu pembayaran',
-      treatButton: 'Traktir',
+      payOwn: 'Bayar Tagihan Meja',
+      treatAll: 'Bayar Tagihan Meja',
+      treatAllSub: 'Bayar seluruh tagihan meja dalam satu pembayaran',
+      treatButton: 'Bayar',
       jukeboxTitle: 'Bistro Smart Sound',
       jukeboxSub: 'Smart Jukebox Spotify',
       jukeboxDesc: 'Mainkan lagu piringan hitam pilihan Anda secara live di sound-system kafe kami. Masukkan kata kunci pencarian lagu dan klik request!',
@@ -183,8 +179,8 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
       payModalTotal: 'Jumlah yang harus di-transfer',
       cancel: 'Tutup Batalkan',
       confirmPaid: 'Konfirmasi Lunas',
-      treatModalTitle: 'Traktir Kasir QRIS',
-      treatModalDesc: 'Menanggung lunas pembayaran hidangan untuk XYZ secara serentak.',
+      treatModalTitle: 'Pembayaran Tagihan Meja',
+      treatModalDesc: 'Melunasi seluruh pembayaran hidangan meja ini.',
       treatModalSub: 'Total Tagihan Gabungan Se-Meja',
       successTitle: 'Status Pesanan',
       successSub: 'Terima kasih! Pesanan Anda sedang diproses oleh Kasir. Silakan tunjukkan layar ini ke kasir untuk pembayaran.',
@@ -199,16 +195,16 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
     en: {
       back: 'Back',
       headerTitle: 'BILLING & JUKEBOX DETAIL',
-      headerSub: 'Authentic Smart Split-Bill',
+      headerSub: 'Simple Table Billing',
       table: 'Table',
       unpaidGrandTotal: 'Unpaid Grand Total',
-      groupBilling: 'Shared Table Billing',
-      groupBillingSub: 'Pay your own selection independently or treat all table mates',
+      groupBilling: 'Collective Table Billing',
+      groupBillingSub: 'All dishes are combined into one order for this table',
       cartEmpty: 'Shopping cart is empty',
       cartEmptySub: 'Please select and order dishes from the home menu first.',
       paid: 'PAID',
-      payOwn: 'Pay My Bill',
-      treatAll: 'Treat Everyone at Table',
+      payOwn: 'Pay Table Bill',
+      treatAll: 'Pay Table Bill',
       treatAllSub: 'Cover all unpaid bills at once in a single transaction',
       treatButton: 'Treat',
       jukeboxTitle: 'Bistro Smart Sound',
@@ -411,7 +407,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
         table: 'sb_orders',
         filter: `table_number=eq.${cleanTableNum}`
       }, (payload) => {
-        console.log("⚡ [REALTIME UPDATE] Deteksi perubahan split-bill/payment meja:", payload);
+        console.log("⚡ [REALTIME UPDATE] Deteksi perubahan order/payment meja:", payload);
         fetchActiveTableOrder();
       })
       .on('broadcast', { event: 'order_updated' }, () => {
@@ -579,44 +575,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
           menuItems = MENU_ITEMS;
         }
 
-        const grouped: { [key: string]: typeof bills[0]['items'] } = {};
-        
-        cart.forEach((item) => {
-          // Cari menu item berdasarkan ID (string atau number)
-          const menu = menuItems?.find((m) => m.id?.toString() === item.menuItemId?.toString());
-          const price = menu ? menu.price : 25000;
-          const name = menu ? menu.name : `Menu #${item.menuItemId}`;
-
-          if (!grouped[item.user]) {
-            grouped[item.user] = [];
-          }
-          grouped[item.user].push({
-            name,
-            price,
-            quantity: item.quantity,
-            total: price * item.quantity
-          });
-        });
-
-        const computedBills: UserBill[] = Object.keys(grouped).map((userName) => {
-          const items = grouped[userName];
-          const subtotal = items.reduce((sum, i) => sum + i.total, 0);
-          const taxRate = Number(localStorage.getItem('scanbite_tax_percent') || '10') / 100;
-          const serviceRate = Number(localStorage.getItem('scanbite_service_charge_percent') || '5') / 100;
-          const taxAndService = Math.round(subtotal * (taxRate + serviceRate));
-          const grandTotal = subtotal + taxAndService;
-          
-          return {
-            name: userName,
-            items,
-            subtotal,
-            taxAndService,
-            grandTotal,
-            isPaid: false
-          };
-        });
-
-        setBills(computedBills);
+        setBills(computeBillsFromCart(cart, menuItems));
       } catch (err: any) {
         console.warn('Silent fallback inside Checkout fetchMenuAndCompute:', err.message);
         // Fallback is already loaded as CachedBills on start, so we do not overwrite bills with empty
@@ -721,144 +680,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
     }
   }, [jukeboxQueue]);
 
-  // 3. Fungsi Bayar Mandiri Bill individual 
-  const syncGroupSplitBillsToSupabase = async (currentBills: UserBill[]) => {
-    if (!supabase || !tableNumber) return;
-    try {
-      const cleanNum = tableNumber.replace('Meja ', '').trim().padStart(2, '0');
-      const orderIdToUse = lastOrderId || `ord-split-${cleanNum}-${Date.now().toString().slice(-4)}`;
-      
-      const totalOrderValue = currentBills.reduce((sum, b) => sum + b.grandTotal, 0);
-      const isAllPaid = currentBills.every(b => b.isPaid);
-      
-      const mappedItems = currentBills.flatMap(b => {
-        const detailPayStr = b.isPaid 
-          ? (b.payMethod === 'cash' ? 'Tunai Lunas' : 'QRIS Lunas')
-          : 'Belum Lunas';
-        return b.items.map(it => ({
-          item_name: it.name,
-          price: it.price,
-          quantity: it.quantity,
-          ordered_by: `${b.name} (${detailPayStr})`
-        }));
-      });
-
-      // Mengamankan identitas Host agar tidak hilang tertimpa oleh Guest
-      const originalHost = activeOrder?.customer_name 
-        ? activeOrder.customer_name.split('&')[0].split(',')[0].trim() 
-        : (customerName || 'Pelanggan');
-
-      // Ambil daftar tamu lain yang sudah melunasi tagihannya untuk digabungkan
-      const paidGuests = currentBills
-        .filter(b => b.isPaid && b.name?.toLowerCase().trim() !== originalHost.toLowerCase().trim())
-        .map(b => b.name);
-
-      const customerNameSummary = paidGuests.length > 0
-        ? `${originalHost} & ${paidGuests.join(', ')}`
-        : originalHost;
-
-      const payload = {
-        id: orderIdToUse,
-        table_number: cleanNum,
-        customer_name: customerNameSummary,
-        total_price: totalOrderValue,
-        payment_method: payMethod,
-        status: isAllPaid ? 'completed' : 'pending',
-        payment_status: isAllPaid ? 'paid' : 'pending',
-        order_items: mappedItems,
-        split_bills: currentBills,
-        splitBills: currentBills,
-        song_title: activeReceipt?.trackTitle || null,
-        created_at: new Date().toISOString()
-      };
-
-      console.log("🔄 Synchronizing group split-bill to Supabase...", payload.id);
-      const { error } = await supabase.from('sb_orders').upsert([payload]);
-      if (error) {
-        console.warn("Retrying partial sync without JSON columns due to potential rules or schema variation:", error.message);
-        // Fallback: update without split_bills / splitBills json columns
-        await supabase.from('sb_orders').upsert([{
-          id: orderIdToUse,
-          table_number: cleanNum,
-          customer_name: customerNameSummary,
-          total_price: totalOrderValue,
-          payment_method: payMethod,
-          status: isAllPaid ? 'completed' : 'pending',
-          payment_status: isAllPaid ? 'paid' : 'pending',
-          order_items: mappedItems,
-          song_title: activeReceipt?.trackTitle || null,
-          created_at: new Date().toISOString()
-        }]);
-      }
-
-      if (orderIdToUse !== lastOrderId) {
-        setLastOrderId(orderIdToUse);
-        localStorage.setItem('scanbite_last_order_id', orderIdToUse);
-      }
-    } catch (err: any) {
-      console.warn("syncGroupSplitBillsToSupabase error:", err.message);
-    }
-  };
-
-  // Synchronize Supabase activeOrder updates to our local bills state (Split Bill Real-time Sync!)
-  useEffect(() => {
-    if (activeOrder) {
-      // 1. Check if the activeOrder has split_bills or splitBills saved as json
-      const dbSplitBills = activeOrder.split_bills || activeOrder.splitBills;
-      if (Array.isArray(dbSplitBills) && dbSplitBills.length > 0) {
-        console.log("🔄 [REALTIME SYNC] Menerima info split bills dari Supabase:", dbSplitBills);
-        
-        // Merge the isPaid status from database to our local state
-        setBills((prevBills) => {
-          return prevBills.map((localBill) => {
-            const matchedDbBill = dbSplitBills.find(
-              (dbBill: any) => dbBill.name?.toLowerCase().trim() === localBill.name?.toLowerCase().trim()
-            );
-            if (matchedDbBill) {
-              return {
-                ...localBill,
-                isPaid: matchedDbBill.isPaid || matchedDbBill.is_paid || matchedDbBill.status === 'LUNAS' || matchedDbBill.status === 'paid',
-                payMethod: matchedDbBill.payMethod || matchedDbBill.pay_method,
-                cashAmount: matchedDbBill.cashAmount || matchedDbBill.cash_amount || 0,
-                changeAmount: matchedDbBill.changeAmount || matchedDbBill.change_amount || 0
-              };
-            }
-            return localBill;
-          });
-        });
-      } else {
-        // 2. If split_bills is not a direct column, let's parse payment status from mapped order_items!
-        const items = activeOrder.order_items || activeOrder.items || [];
-        if (Array.isArray(items) && items.length > 0) {
-          setBills((prevBills) => {
-            return prevBills.map((localBill) => {
-              // Check if all items for this user in db are marked as Lunas or paid
-              const userItemsInDb = items.filter((it: any) => {
-                const orderedBy = (it.ordered_by || it.orderedBy || '').toLowerCase();
-                return orderedBy.includes(localBill.name.toLowerCase());
-              });
-              
-              if (userItemsInDb.length > 0) {
-                const allUserItemsPaid = userItemsInDb.every((it: any) => {
-                  const orderedBy = (it.ordered_by || it.orderedBy || '').toLowerCase();
-                  return orderedBy.includes('lunas') || orderedBy.includes('paid') || orderedBy.includes('sukses');
-                });
-                
-                if (allUserItemsPaid) {
-                  return {
-                    ...localBill,
-                    isPaid: true
-                  };
-                }
-              }
-              return localBill;
-            });
-          });
-        }
-      }
-    }
-  }, [activeOrder]);
-
+  // 3. Submit one collective table bill.
   const handlePayBill = async (userName: string) => {
     const userChange = payMethod === 'cash' ? Math.max(0, cashAmount - (paymentModalUser?.grandTotal || 0)) : 0;
     
@@ -882,16 +704,10 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
       changeAmount: userChange
     } : b);
     
-    // Paling penting: Synchronize the partial split bills state to Supabase so other users receive the update in real-time
-    await syncGroupSplitBillsToSupabase(updatedBills);
-
-    // Jika SELURUH kawan semeja sudah melunasi tagihannya masing-masing
-    if (updatedBills.every((b) => b.isPaid)) {
-      await registerCompletedOrder(updatedBills);
-    }
+    await registerCompletedOrder(updatedBills);
   };
 
-  // 4. Fungsi Traktir Semua Meja
+  // 4. Legacy one-click full-table payment handler
   const handlePayAllBills = async () => {
     const totalVal = totalUnpaidGrandTotal;
     const userChange = payMethod === 'cash' ? Math.max(0, cashAmount - totalVal) : 0;
@@ -908,9 +724,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
     setShowTreatAllModal(false);
     
     // Synchronize to Supabase immediately
-    await syncGroupSplitBillsToSupabase(updatedBills);
-
-    await registerCompletedOrder(updatedBills, `${customerName} (Traktir Se-Meja)`);
+    await registerCompletedOrder(updatedBills, customerName || 'Pelanggan');
   };
 
   const triggerPayBillConfirmation = (userBill: UserBill) => {
@@ -919,7 +733,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
       tableNumber: tableNumber,
       items: userBill.items.map(i => ({ name: i.name, quantity: i.quantity, total: i.total })),
       totalAmount: userBill.grandTotal,
-      label: `Pembayaran Mandiri oleh ${userBill.name}`,
+      label: `Pembayaran Tagihan Meja ${tableNumber}`,
       method: payMethod === 'qris' ? 'QRIS / E-Wallet' : `Tunai / Cash (Uang: ${formatPrice(cashAmount)}, Kembali: ${formatPrice(calculatedChange)})`
     });
     setPendingPaymentAction(() => () => {
@@ -948,7 +762,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
       tableNumber: tableNumber,
       items: allItems,
       totalAmount: totalUnpaidGrandTotal,
-      label: `Traktir Semua Kawan Se-Meja (Sesi Aktif: ${customerName})`,
+      label: `Pembayaran Tagihan Meja ${tableNumber}`,
       method: payMethod === 'qris' ? 'QRIS / E-Wallet' : `Tunai / Cash (Uang: ${formatPrice(cashAmount)}, Kembali: ${formatPrice(calculatedChange)})`
     });
     setPendingPaymentAction(() => () => {
@@ -1007,7 +821,8 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
 
       const { data: insertedOrder, error } = await supabase
         .from('sb_orders')
-        .upsert([finalPayload]);
+        .insert([finalPayload])
+        .select();
 
       if (error) {
         console.error('❌ Supabase insert error:', error.message);
@@ -1015,6 +830,10 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
       }
 
       console.log('✅ Sinkronisasi checkout berhasil.');
+      await supabase
+        .from('sb_tables')
+        .update({ status: 'TERISI', session_id: null, nama_pelanggan: cleanCustomerName })
+        .or(`table_number.eq."Meja ${cleanTableNumber}",table_number.eq."${cleanTableNumber}"`);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('scanbite-sync'));
       }
@@ -1076,30 +895,23 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
       const cashPayments = finalBillsState.filter(b => b.isPaid && b.payMethod === 'cash');
       const qrisPayments = finalBillsState.filter(b => b.isPaid && b.payMethod === 'qris');
       
-      const originalHost = activeOrder?.customer_name 
-        ? activeOrder.customer_name.split('&')[0].split(',')[0].trim() 
-        : (customerName || 'Pelanggan');
-
-      let customerNameSummary = nameOverrider || originalHost;
+      let customerNameSummary = nameOverrider || customerName || 'Pelanggan';
       let overallPayMethod = payMethod;
       
       if (cashPayments.length > 0 && qrisPayments.length > 0) {
-        const cashDetails = cashPayments.map(b => `${b.name} (Kembali Rp ${b.changeAmount?.toLocaleString('id-ID')})`).join(', ');
-        customerNameSummary = `${customerNameSummary} (SPLIT MIXED: Bawa Kembalian untuk ${cashDetails})`;
+        const cashDetails = cashPayments.map(b => `Kembali Rp ${b.changeAmount?.toLocaleString('id-ID')}`).join(', ');
+        customerNameSummary = `${customerNameSummary} (${cashDetails})`;
         overallPayMethod = 'cash';
       } else if (cashPayments.length > 0) {
-        const cashDetails = cashPayments.map(b => `${b.name} (Kembali Rp ${b.changeAmount?.toLocaleString('id-ID')})`).join(', ');
-        customerNameSummary = `${customerNameSummary} (CASH SPLIT: Bawa Kembalian untuk ${cashDetails})`;
+        const cashDetails = cashPayments.map(b => `Kembali Rp ${b.changeAmount?.toLocaleString('id-ID')}`).join(', ');
+        customerNameSummary = `${customerNameSummary} (${cashDetails})`;
         overallPayMethod = 'cash';
       } else if (qrisPayments.length > 0) {
-        customerNameSummary = `${customerNameSummary} (QRIS SPLIT)`;
+        customerNameSummary = `${customerNameSummary} (QRIS)`;
         overallPayMethod = 'qris';
       }
 
-      // 1. KASIR/PELANGGAN: Simpan transaksi terlebih dahulu ke penyimpanan lokal (Offline-First)
-      const existingSessionId = localStorage.getItem('scanbite_session_id');
-      const isExistingOrder = existingSessionId && (existingSessionId.startsWith('ord-') || existingSessionId.startsWith('sess-'));
-      const generatedId = isExistingOrder ? existingSessionId : `ord-${Math.floor(1000 + Math.random() * 9500).toString()}`;
+      const generatedId = `ord-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
       const dataTransaksi = {
         id: generatedId,
         table_number: tableNumber,
@@ -1113,7 +925,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
             name: it.name, 
             price: it.price, 
             quantity: it.quantity, 
-            orderedBy: `${b.name} (${detailPayStr})` 
+            orderedBy: `${customerName || 'Pelanggan'} (${detailPayStr})` 
           }));
         }),
         total_price: totalOrderValue,
@@ -1151,7 +963,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
         payment_method_label: overallPayMethod === 'qris' ? 'QRIS / E-Wallet' : 'Tunai / Cash',
         amountPaid: parsedPaid,
         changeAmount: parsedChange,
-        splitBills: finalBillsState,
+        splitBills: [],
         tax: totalTax,
         service: totalService,
         table_status: supabaseTableData?.status || 'TERISI'
@@ -1714,9 +1526,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
                       <span className={`w-2.5 h-2.5 rounded-full ${userBill.isPaid ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-                      <h4 className="font-extrabold text-[#1C1612] text-xs uppercase tracking-wider">
-                        {userBill.name} {userBill.name === customerName && (lang === 'id' ? ' (Anda)' : ' (You)')}
-                      </h4>
+                      <h4 className="font-extrabold text-[#1C1612] text-xs uppercase tracking-wider">Tagihan Meja {tableNumber}</h4>
                     </div>
                     {userBill.isPaid ? (
                       <span className="text-[10px] font-black text-emerald-700 bg-emerald-100 px-3 py-1 rounded-full flex items-center gap-1.5 shadow-3xs">
@@ -1755,7 +1565,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
                 </div>
               ))}
 
-              {/* OPSI INOVATIF: TRAKTIR SEMUA KAWAN SE-MEJA */}
+              {/* Hidden for normal flow: checkout is now one collective bill. */}
               {unpaidBills.length > 1 && (
                 <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-4.5 mt-5 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-3xs relative overflow-hidden transition-all hover:bg-amber-50/95">
                   <div className="flex items-center gap-3">
@@ -1939,7 +1749,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
             </div>
 
             <p className="text-xs text-[#786455] leading-relaxed">
-              Melakukan pembayaran atas nama <strong className="text-[#8C6239] font-black uppercase">{paymentModalUser.name}</strong>
+              Melakukan pembayaran untuk <strong className="text-[#8C6239] font-black uppercase">Meja {tableNumber}</strong>
             </p>
 
             {/* Opsi Metode Pembayaran (Tabs) */}
@@ -2108,7 +1918,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
               <div className="flex items-center gap-1 text-[#8C6239]">
                 <Gift className="w-4.5 h-4.5" />
                 <span className="text-xs font-black uppercase tracking-wide">
-                  {payMethod === 'qris' ? 'Traktir Kasir QRIS' : 'Traktir Tunai / Cash'}
+                  {payMethod === 'qris' ? 'Pembayaran QRIS' : 'Pembayaran Tunai / Cash'}
                 </span>
               </div>
               <button 
@@ -2121,7 +1931,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
             </div>
 
             <p className="text-xs text-[#786455] leading-relaxed">
-              Menanggung lunas pembayaran hidangan untuk <strong>{unpaidBills.map((b) => b.name).join(', ')}</strong> secara serentak.
+              Melunasi seluruh tagihan hidangan untuk Meja <strong>{tableNumber}</strong>.
             </p>
 
             {/* Opsi Metode Pembayaran (Tabs) */}
@@ -2272,7 +2082,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
               >
                 <span className="relative z-10 flex items-center justify-center gap-1.5">
                   <CheckCircle2 className="w-4 h-4" />
-                  <span>Traktir Lunas</span>
+                  <span>Bayar Lunas</span>
                 </span>
               </button>
             </div>
@@ -2761,7 +2571,7 @@ export default function Checkout({ onNavigate, cart, setCart }: CheckoutProps) {
       {/* Footer Branding */}
       <footer className="absolute bottom-6 left-0 right-0 text-center text-xs text-[#9E8775] font-sans z-30 px-4">
         <p>© 2026 {cafeName}. All rights reserved.</p>
-        <p className="text-[10px] text-[#B2A494] mt-0.5 font-normal">Powered by RasyaTech | Vibe Modern • Digital Jukebox • Real-time Split Billing</p>
+        <p className="text-[10px] text-[#B2A494] mt-0.5 font-normal">Powered by RasyaTech | Vibe Modern • Digital Jukebox • Table Ordering</p>
       </footer>
 
     </div>

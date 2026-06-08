@@ -142,7 +142,6 @@ export default function Aisommelier({
   // Step 3: Register verified order database/localStorage simulation
   const registerOrderFromAi = async (payMethod: string, payStatus: string) => {
     const totalOrderValue = getGrandTotal();
-    const mySessionId = localStorage.getItem('scanbite_session_id') || `sess-${Date.now()}`;
     const timestampStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
     const mappedItems = cart.map(c => {
@@ -165,7 +164,6 @@ export default function Aisommelier({
       status: 'pending' as const,
       paymentMethod: payMethod,
       paymentStatus: payStatus,
-      sessionId: mySessionId,
       createdAt: timestampStr
     };
 

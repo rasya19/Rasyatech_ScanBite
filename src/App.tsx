@@ -5,6 +5,27 @@ import Checkout from './pages/Checkout';
 import Admin from './pages/Admin';
 import { CartItem } from './types';
 
+const normalizeCollectiveCart = (items: CartItem[]) => {
+  const grouped = new Map<string, CartItem>();
+
+  items.forEach((item) => {
+    const existing = grouped.get(item.menuItemId);
+    if (existing) {
+      grouped.set(item.menuItemId, {
+        ...existing,
+        quantity: existing.quantity + item.quantity
+      });
+    } else {
+      grouped.set(item.menuItemId, {
+        ...item,
+        user: 'Meja'
+      });
+    }
+  });
+
+  return Array.from(grouped.values());
+};
+
 export default function App() {
   const [currentPage, setCurrentPage] = useState<string>(() => {
     const path = window.location.pathname.toLowerCase().replace(/^\/|\/$/g, '');
@@ -47,14 +68,19 @@ export default function App() {
     const savedCart = localStorage.getItem('scanbite_cart');
     if (savedCart) {
       try {
-        return JSON.parse(savedCart);
+        return normalizeCollectiveCart(JSON.parse(savedCart));
       } catch (_) {}
     }
     return [];
   });
 
   useEffect(() => {
-    localStorage.setItem('scanbite_cart', JSON.stringify(cart));
+    const normalizedCart = normalizeCollectiveCart(cart);
+    if (JSON.stringify(normalizedCart) !== JSON.stringify(cart)) {
+      setCart(normalizedCart);
+      return;
+    }
+    localStorage.setItem('scanbite_cart', JSON.stringify(normalizedCart));
   }, [cart]);
 
   // Simple clean router switcher with active pushState updating
